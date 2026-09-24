@@ -4,7 +4,7 @@ using namespace metal;
 
 // Draws the card in one pass. The atlas holds the sharp picture and copies blurred by
 // maxBlur * (level / levels)^2, so each pixel works out how blurred it should be and blends the two
-// nearest copies, like a lens focused on the screen. The same amount can also darken it.
+// nearest copies, like a lens focused on the screen. A second, separately shaped amount darkens it.
 //
 // The card's rounded outline softens as much as the blur is at that spot, fading in and spilling out
 // the way an out-of-focus object's edge does. The view reaches past the card by a margin for that.
@@ -23,7 +23,8 @@ using namespace metal;
 //   24 levels            25-26 atlas size
 //   27 dim               28-29 margin, as a fraction of the card's width and height
 //   30 corner radius of the card, in points     31 1 to shape the picture by the card's outline
-//   32 on: for each copy, sharp first, where it sits in the atlas (x, y, width, height)
+//   32-37 where the dimming is, like 1-4 and 7-8 for the blur: kind, edge, front, width, full depth, side
+//   40 on: for each copy, sharp first, where it sits in the atlas (x, y, width, height)
 
 static float smootherstep01(float x) {
     x = saturate(x);
@@ -37,18 +38,19 @@ static void cardSpace(float2 position, float2 size, device const float *values, 
     points = size / (1 + 2 * margin);
 }
 
-/// How much of the effect there is at this pixel, from 0 to 1.
-static float effectAmount(float2 position, float2 uv, device const float *values) {
+/// How much of an effect there is at this pixel, from 0 to 1: for
+/// depth, reaching full strength `full` centimeters from focus; for an edge, fading in from `front`
+/// over `width`.
+static float effectAmount(float2 position, float2 uv, device const float *values, int kind, int edge,
+                          float front, float width, float full, float side) {
     float2 onCard = saturate(uv);
-    int kind = int(values[1]);
     if (kind == 1) {
         // Distance from the screen only changes from the card's top to its bottom.
         float depth = mix(values[5], values[6], onCard.y);
-        float side = values[8];
         float counted = side < -0.5 ? max(-depth, 0.0) : side > 0.5 ? max(depth, 0.0) : abs(depth);
         // Like a lens: blur starts as soon as something leaves focus and grows steadily with
         // distance, easing into the full amount.
-        float x = saturate(counted / values[7]);
+        float x = saturate(counted / full);
         return 1 - (1 - x) * (1 - x);
     }
     if (kind >= 2) {
@@ -59,15 +61,19 @@ static float effectAmount(float2 position, float2 uv, device const float *values
             float w = position.x * values[11] + position.y * values[14] + values[17];
             spot = saturate(float2(x, y) / w / float2(values[18], values[19]));
         }
-        int edge = int(values[2]);
         float fromEdge = edge == 0 ? spot.y
                        : edge == 1 ? 1 - spot.y
                        : edge == 2 ? spot.x
                        : edge == 3 ? 1 - spot.x
                        : 1 - length(spot * 2 - 1);
-        return smootherstep01((values[3] - max(fromEdge, 0.0)) / values[4]);
+        return smootherstep01((front - max(fromEdge, 0.0)) / width);
     }
     return 0;
+}
+
+static float blurAmount(float2 position, float2 uv, device const float *values) {
+    return effectAmount(position, uv, values, int(values[1]), int(values[2]),
+                        values[3], values[4], values[7], values[8]);
 }
 
 /// The normal curve's cumulative share, approximated.
@@ -102,7 +108,7 @@ static float blurSigma(float amount, float2 points, device const float *values) 
 /// One copy at picture position `uv`, its edges extended beyond the picture.
 static half4 sampleCopy(texture2d<half> atlas, device const float *values, int copy, float2 uv) {
     constexpr sampler linear(coord::normalized, filter::linear, address::clamp_to_edge);
-    int base = 32 + copy * 4;
+    int base = 40 + copy * 4;
     float2 origin = float2(values[base], values[base + 1]);
     float2 extent = float2(values[base + 2], values[base + 3]);
     // Half a pixel in from the copy's edges, so filtering never reaches the neighboring copy.
@@ -125,14 +131,16 @@ static half4 sampleBlurred(texture2d<half> atlas, device const float *values, fl
                                device const float *values, int count) {
     float2 uv, points;
     cardSpace(position, size, values, uv, points);
-    float amount = effectAmount(position, uv, values);
+    float amount = blurAmount(position, uv, values);
+    float dimAmount = effectAmount(position, uv, values, int(values[32]), int(values[33]),
+                                   values[34], values[35], values[36], values[37]);
 
     // Copies are spaced by the square of their share of the full blur, so this lands on the level
     // matching strength * amount.
     float level = float(int(values[24])) * sqrt(saturate(values[0] * amount));
     half4 shown = sampleBlurred(atlas, values, level, uv);
     // Colors are premultiplied, so darkening scales color and leaves coverage alone.
-    shown.rgb *= half(1 - saturate(values[27] * amount));
+    shown.rgb *= half(1 - saturate(values[27] * dimAmount));
 
     if (values[31] > 0.5) {
         shown *= half(cardCoverage(uv, points, values[30], blurSigma(amount, points, values)));
@@ -145,7 +153,7 @@ static half4 sampleBlurred(texture2d<half> atlas, device const float *values, fl
 [[ stitchable ]] half4 cardOutside(float2 position, half4 color, float2 size, device const float *values, int count) {
     float2 uv, points;
     cardSpace(position, size, values, uv, points);
-    float amount = effectAmount(position, uv, values);
+    float amount = blurAmount(position, uv, values);
     float covered = cardCoverage(uv, points, values[30], blurSigma(amount, points, values));
     return half4(0, 0, 0, half(1 - covered));
 }

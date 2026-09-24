@@ -56,17 +56,17 @@ beside the camera notch, with the menu bar and Dock hidden. Press **F** or **Esc
   sets how strongly and *Comes closer* which lid movement does it. The date and time sit between the
   sky and the mountains, in SF Pro's variable font set like a phone's lock screen (narrow, medium
   weight, fading slightly toward the bottom), adjustable with *Width*, *Weight*, a *Height* stretch,
-  *Opacity* and a *Blend* mode. They dim with the rest of the scene but stay sharp, and don't move
-  with the parallax.
-- **Effects**: a blur, with a *Strength*, a *Dim* that darkens the blurred parts to match (most
-  where the blur is strongest), and what it's *Based on*:
+  *Opacity* and a *Blend* mode. They dim with the rest of the scene. *Depth* lets them come closer
+  with the parallax like a layer (0% keeps them fixed), and *Blur* lets them blur (0% keeps them sharp).
+- **Effects**: a blur and a dim, set up separately. Each has a *Strength* and what it's *Based on*.
+  The dim comes down from the top edge by default, sliding in as the lid moves:
   - **Depth (3D)** works like a lens focused on the screen: parts that end up farther away than
     where your eyes are focused go soft, starting as soon as they leave focus and growing steadily
     with distance. The card's rounded outline softens with it, fading in and spilling out the way an
     out-of-focus object's edge does, and stays crisp wherever the picture is sharp. In *Flat* mode that's the parts of
     the screen tipping away from you as the lid opens; in the other modes it's the card as the screen
-    moves in front of it. *Full at* sets how far gives the full blur, and *Blurs* picks what goes
-    soft: things farther away (the default), closer, or both.
+    moves in front of it. *Full at* sets how far gives the full effect, and *Blurs* (or *Dims*) picks
+    what it applies to: things farther away (the default), closer, or both.
   - An **edge** (top, bottom, left, right or all) fades in from that edge. *Reach* sets how far in
     it goes and *Lid reaction* lets the lid slide it in and out: at 0% it stays put; at 100% there's
     none at the anchored angle, and a soft fade slides in as the lid moves, all the way after 45°.

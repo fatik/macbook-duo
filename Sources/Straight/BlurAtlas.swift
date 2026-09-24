@@ -133,7 +133,7 @@ struct BlurredCard: View {
     }
 }
 
-/// Where the blur is for one frame.
+/// Where the blur (or the dimming) is for one frame.
 enum BlurShape {
     case none
     /// Grows with how much farther away (or nearer) than the in-focus surface each part of the card
@@ -160,43 +160,50 @@ func blurMargin(cardSize: CGSize, strength: Double, shape: BlurShape) -> CGSize 
 /// `margin` is how far the view reaches past the card, from `blurMargin`. `cornerRadius` rounds the
 /// card's outline, in the view's points, and `shapesEdge` says whether this picture is shaped by it
 /// (a layer in a stack isn't; the stack is shaped once on top by `CardOutside`).
-func blurShaderValues(strength: Double, dim: Double, shape: BlurShape, atlas: BlurAtlas,
+/// `dim` darkens the picture where `dimShape` says, separately from the blur.
+func blurShaderValues(strength: Double, shape: BlurShape, dim: Double, dimShape: BlurShape, atlas: BlurAtlas,
                       cardSize: CGSize, margin: CGSize, crops: Bool, pictureRect: CGRect? = nil,
                       cornerRadius: Double = 0, shapesEdge: Bool = true) -> [Float] {
     let cardAspect = cardSize.width / cardSize.height
-    var values = [Float](repeating: 0, count: 32)
+    var values = [Float](repeating: 0, count: 40)
     values[0] = Float(strength)
 
-    func setEdge(_ edge: EffectEdge, _ ramp: EffectRamp) {
-        values[2] = Float(EffectEdge.allCases.firstIndex(of: edge) ?? 0)
-        values[3] = Float(ramp.front)
-        values[4] = Float(max(ramp.width, 0.0001))
-    }
-    switch shape {
-    case .none:
-        values[1] = 0
-    case .depth(let top, let bottom, let full, let side):
-        values[1] = 1
-        values[5] = Float(top)
-        values[6] = Float(bottom)
-        values[7] = Float(max(full, 0.0001))
-        values[8] = switch side {
-        case .nearer: -1
-        case .either: 0
-        case .farther: 1
+    /// Puts `shape` in the slots for its kind, edge, front, width, full depth and side. Where the
+    /// card is (its depth and where it lands in the window) is the same for both shapes.
+    func pack(_ shape: BlurShape, into slots: [Int]) {
+        func setEdge(_ edge: EffectEdge, _ ramp: EffectRamp) {
+            values[slots[1]] = Float(EffectEdge.allCases.firstIndex(of: edge) ?? 0)
+            values[slots[2]] = Float(ramp.front)
+            values[slots[3]] = Float(max(ramp.width, 0.0001))
         }
-    case .cardEdge(let edge, let ramp):
-        values[1] = 2
-        setEdge(edge, ramp)
-    case .windowEdge(let edge, let ramp, let t, let windowSize):
-        values[1] = 3
-        setEdge(edge, ramp)
-        for (index, m) in [t.m11, t.m12, t.m13, t.m21, t.m22, t.m23, t.m31, t.m32, t.m33].enumerated() {
-            values[9 + index] = Float(m)
+        switch shape {
+        case .none:
+            values[slots[0]] = 0
+        case .depth(let top, let bottom, let full, let side):
+            values[slots[0]] = 1
+            values[5] = Float(top)
+            values[6] = Float(bottom)
+            values[slots[4]] = Float(max(full, 0.0001))
+            values[slots[5]] = switch side {
+            case .nearer: -1
+            case .either: 0
+            case .farther: 1
+            }
+        case .cardEdge(let edge, let ramp):
+            values[slots[0]] = 2
+            setEdge(edge, ramp)
+        case .windowEdge(let edge, let ramp, let t, let windowSize):
+            values[slots[0]] = 3
+            setEdge(edge, ramp)
+            for (index, m) in [t.m11, t.m12, t.m13, t.m21, t.m22, t.m23, t.m31, t.m32, t.m33].enumerated() {
+                values[9 + index] = Float(m)
+            }
+            values[18] = Float(windowSize.width)
+            values[19] = Float(windowSize.height)
         }
-        values[18] = Float(windowSize.width)
-        values[19] = Float(windowSize.height)
     }
+    pack(shape, into: [1, 2, 3, 4, 7, 8])
+    pack(dimShape, into: [32, 33, 34, 35, 36, 37])
 
     // Filling a card of another shape crops the picture's middle.
     var scale = CGSize(width: 1, height: 1)

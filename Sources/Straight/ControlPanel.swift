@@ -38,6 +38,8 @@ struct ControlPanel: View {
     @AppStorage("clockStretch") private var clockStretch = ClockStyle.phone.stretch
     @AppStorage("clockOpacity") private var clockOpacity = 1.0
     @AppStorage("clockBlend") private var clockBlend: ClockBlend = .normal
+    @AppStorage("clockDepth") private var clockDepth = 0.0
+    @AppStorage("clockBlur") private var clockBlur = 0.0
 
     /// macOS doesn't say how round the screen's corners are, so this is an estimate for recent
     /// MacBooks, in millimeters; the slider is there to match it by eye.
@@ -48,7 +50,8 @@ struct ControlPanel: View {
     @AppStorage("viewSensitivity") private var sensitivity = 1.0
     @AppStorage("viewDistance") private var viewDistance = 0.0
     @AppStorage("viewLookingDown") private var lookingDown = 0.0
-    private var blur = StoredEffect("blur", edge: .top)
+    private var blur = StoredEffect.blur()
+    private var dim = StoredEffect.dim()
 
     init(cardWidth: Double, hasImage: Bool, canCalibrate: Bool, calibrator: EyeCalibrator,
          defaultViewingDistance: Double, status: String,
@@ -116,10 +119,13 @@ struct ControlPanel: View {
             case .viewer: viewerControls
             }
 
+            // Always two lines tall, so the panel doesn't jump as the text wraps.
             Text(status)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
+                .lineLimit(2, reservesSpace: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(14)
         .frame(width: 440)
@@ -252,6 +258,21 @@ struct ControlPanel: View {
                         }
                         .help("How the clock mixes with the picture behind it. Plus Lighter and Screen let the "
                               + "sky's color show through, like frosted glass.")
+                        GridRow {
+                            Text("Depth")
+                            Slider(value: $clockDepth)
+                            valueLabel(clockDepth < 0.005 ? "Fixed" : percent(clockDepth))
+                        }
+                        .help("Whether the clock comes toward you with the parallax like a layer, when the lid "
+                              + "moves the way Comes closer says. At 0 it stays put; the sky moves like 12% and "
+                              + "the mountains like 50%.")
+                        GridRow {
+                            Text("Blur")
+                            Slider(value: $clockBlur)
+                            valueLabel(clockBlur < 0.005 ? "Sharp" : percent(clockBlur))
+                        }
+                        .help("How much the clock blurs where the scene does, following the same depth. At 0 it "
+                              + "stays sharp and only dims.")
                     }
                 }
                 .font(.callout)
@@ -261,13 +282,15 @@ struct ControlPanel: View {
 
     private var effectControls: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
-            effectRows("Blur", blur)
+            effectRows("Blur", blur, verb: "Blurs")
+            Divider().gridCellUnsizedAxes(.horizontal).padding(.vertical, 4)
+            effectRows("Dim", dim, verb: "Dims")
         }
         .font(.callout)
     }
 
     @ViewBuilder
-    private func effectRows(_ title: String, _ effect: StoredEffect) -> some View {
+    private func effectRows(_ title: String, _ effect: StoredEffect, verb: String) -> some View {
         GridRow {
             Text(title).font(.headline)
             Picker("Based on", selection: effect.$edge) {
@@ -283,13 +306,8 @@ struct ControlPanel: View {
             Slider(value: effect.$strength)
             valueLabel(percent(effect.strength))
         }
-        GridRow {
-            Text("Dim")
-            Slider(value: effect.$dim)
-            valueLabel(percent(effect.dim))
-        }
-        .help("How much the blurred parts also darken, most where the blur is strongest. "
-              + "At 100% they go black where the blur is full.")
+        .help(verb == "Dims" ? "How dark it gets where it's full. At 100% it goes black."
+                             : "How blurred it gets where it's full.")
 
         if effect.edge == .depth {
             // Depth already moves with the lid, so there's no lid reaction to set.
@@ -298,11 +316,11 @@ struct ControlPanel: View {
                 Slider(value: effect.$spread, in: 0.05...1)
                 valueLabel("\(Int(effect.fullDepth.rounded())) cm")
             }
-            .help("How much farther away (or nearer) than the screen a part has to be to get the full blur. "
-                  + "What's in focus stays sharp.")
+            .help("How much farther away (or nearer) than the screen a part has to be to get the full effect. "
+                  + "What's in focus is left alone.")
             GridRow {
-                Text("Blurs")
-                Picker("Blurs", selection: effect.$depthSide) {
+                Text(verb)
+                Picker(verb, selection: effect.$depthSide) {
                     ForEach(DepthSide.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.menu)
@@ -313,10 +331,11 @@ struct ControlPanel: View {
         } else {
             GridRow {
                 Text("Reach")
-                Slider(value: effect.$spread, in: 0.05...1)
+                Slider(value: effect.$spread, in: 0.05...StoredEffect.longestReach)
                 valueLabel(percent(effect.spread))
             }
-            .help("How far in from the edge it goes, at most.")
+            .help("How far in from the edge it goes, at most. It eases out toward its end, so past 100% it "
+                  + "carries on across the far side instead of fading out before it.")
             GridRow {
                 Text("Lid reaction")
                 Slider(value: effect.$lidReaction)

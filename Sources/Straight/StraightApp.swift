@@ -47,7 +47,8 @@ struct ContentView: View {
     @AppStorage("cornerRadius") private var cornerRadius = ControlPanel.defaultCornerRadius
     /// Whether the card covers the whole window instead of following the card width setting.
     @AppStorage("fillsWindow") private var fillsWindow = false
-    private var blur = StoredEffect("blur", edge: .top)
+    private var blur = StoredEffect.blur()
+    private var dim = StoredEffect.dim()
     @State private var image: CGImage?
     /// The checkerboard as a picture, so it can go through the blur shader like a photo.
     @State private var checkerboard: CGImage?
@@ -65,6 +66,10 @@ struct ContentView: View {
     @AppStorage("clockStretch") private var clockStretch = ClockStyle.phone.stretch
     @AppStorage("clockOpacity") private var clockOpacity = 1.0
     @AppStorage("clockBlend") private var clockBlend: ClockBlend = .normal
+    /// How near the clock is, for parallax, from 0 (stays put) to 1 (moves with the nearest layer).
+    @AppStorage("clockDepth") private var clockDepth = 0.0
+    /// How strongly the clock blurs where the scene does, from 0 (stays sharp) to 1.
+    @AppStorage("clockBlur") private var clockBlur = 0.0
     @State private var clockAtlas: BlurAtlas?
     @State private var isChoosingImage = false
     @State private var isDropTargeted = false
@@ -132,8 +137,11 @@ struct ContentView: View {
                                                        window: fillsWindow ? (toWindow, size) : nil)
                                 // Corners the same size on screen whatever the card's size.
                                 let corner = cornerRadius / 10 / placement.cmPerPoint * sharpness
+                                let dimShape = dim.shape(lidAngle: sensor.angle, anchorAngle: anchor, pose: pose,
+                                                         window: fillsWindow ? (toWindow, size) : nil)
                                 let values = { (atlas: BlurAtlas, strength: Double, rect: CGRect?, shapesEdge: Bool) in
-                                    blurShaderValues(strength: strength, dim: blur.dim, shape: shape, atlas: atlas,
+                                    blurShaderValues(strength: strength, shape: shape,
+                                                     dim: dim.strength, dimShape: dimShape, atlas: atlas,
                                                      cardSize: cardSize, margin: margin,
                                                      crops: rect == nil && fillsWindow && image != nil,
                                                      pictureRect: rect, cornerRadius: corner, shapesEdge: shapesEdge)
@@ -146,10 +154,14 @@ struct ContentView: View {
                                         * travel(from: anchor, to: rig.lidAngle, direction: parallaxDirection)
                                     ZStack {
                                         ForEach(scene.layers.indices, id: \.self) { index in
-                                            // The clock sits between layers and dims with them, but stays sharp.
+                                            // The clock sits between layers and dims with them. It can also
+                                            // move and blur like one.
                                             if index == scene.clockBefore, showsClock, let clockAtlas {
                                                 BlurredCard(atlas: clockAtlas, values: values(
-                                                    clockAtlas, 0, CGRect(x: 0, y: 0, width: 1, height: 1), false))
+                                                    clockAtlas, clockBlur,
+                                                    ParallaxScene.grown(CGRect(x: 0, y: 0, width: 1, height: 1),
+                                                                        by: closer * clockDepth),
+                                                    false))
                                                 .opacity(clockOpacity)
                                                 .blendMode(clockBlend.mode)
                                             }

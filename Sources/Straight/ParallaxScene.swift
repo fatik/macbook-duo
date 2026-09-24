@@ -55,7 +55,13 @@ struct ParallaxScene {
             let height = width * cardAspect * Double(layer.image.height) / Double(layer.image.width)
             rect = CGRect(x: (1 - width) / 2, y: bottom - height, width: width, height: height)
         }
-        let zoom = 1 + closer * layer.depth
+        return grown(rect, by: closer * layer.depth)
+    }
+
+    /// `rect` grown by `amount` (0 leaves it as it is) toward the horizon's middle, the way the
+    /// scene's layers come closer.
+    static func grown(_ rect: CGRect, by amount: Double) -> CGRect {
+        let zoom = 1 + amount
         let focus = CGPoint(x: 0.5, y: horizon)
         return CGRect(x: focus.x + (rect.minX - focus.x) * zoom, y: focus.y + (rect.minY - focus.y) * zoom,
                       width: rect.width * zoom, height: rect.height * zoom)
