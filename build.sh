@@ -12,6 +12,9 @@ build_app() {
     rm -rf "$app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cp "Resources/$name.icns" "$app/Contents/Resources/AppIcon.icns"
+    if [[ -n "${SCENES:-}" ]]; then
+        cp -R "$SCENES" "$app/Contents/Resources/"
+    fi
     swiftc -O -parse-as-library -target arm64-apple-macos14.0 "$@" -o "$app/Contents/MacOS/$name"
     sed -e "s/__NAME__/$name/g" -e "s/__ID__/$bundle_id/g" Info.plist > "$app/Contents/Info.plist"
     if [[ -n "${CAMERA_USAGE:-}" ]]; then
@@ -40,4 +43,5 @@ build_app() {
 build_app Lid local.lid.app Sources/Shared/*.swift Sources/Lid/*.swift
 CAMERA_USAGE="Straight uses the camera to find where your eyes are, so the card can be drawn for your point of view." \
 METAL_SOURCES="Sources/Straight/*.metal" \
+SCENES="Resources/Scene" \
     build_app Straight local.lid.straight Sources/Shared/*.swift Sources/Straight/*.swift

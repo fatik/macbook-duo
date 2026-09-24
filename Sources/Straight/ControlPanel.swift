@@ -14,19 +14,34 @@ struct ControlPanel: View {
     var fillWindow: () -> Void
     var chooseImage: () -> Void
     var clearImage: () -> Void
+    var hasScene: Bool
+    var useScene: () -> Void
     var calibrate: () -> Void
     var isEdgeToEdge: Bool
     var toggleEdgeToEdge: () -> Void
     var hide: () -> Void
 
     enum Tab: String, CaseIterable {
-        case card = "Card", effects = "Effects", viewer = "Viewer"
+        case card = "Card", scene = "Scene", effects = "Effects", viewer = "Viewer"
     }
 
     @AppStorage("panelTab") private var tab: Tab = .card
     @AppStorage("mode") private var mode: CardMode = .facing
     @AppStorage("cardSize") private var cardFill = 0.45
     @AppStorage("fillsWindow") private var fillsWindow = false
+    @AppStorage("cornerRadius") private var cornerRadius = ControlPanel.defaultCornerRadius
+    @AppStorage("parallax") private var parallax = 0.6
+    @AppStorage("parallaxDirection") private var parallaxDirection: LidDirection = .either
+    @AppStorage("showsClock") private var showsClock = true
+    @AppStorage("clockWeight") private var clockWeight = ClockStyle.phone.weight
+    @AppStorage("clockWidth") private var clockWidth = ClockStyle.phone.width
+    @AppStorage("clockStretch") private var clockStretch = ClockStyle.phone.stretch
+    @AppStorage("clockOpacity") private var clockOpacity = 1.0
+    @AppStorage("clockBlend") private var clockBlend: ClockBlend = .normal
+
+    /// macOS doesn't say how round the screen's corners are, so this is an estimate for recent
+    /// MacBooks, in millimeters; the slider is there to match it by eye.
+    static let defaultCornerRadius = 3.0
     @AppStorage("eyeDistance") private var eyeDistance = 55.0
     @AppStorage("eyeHeight") private var eyeHeight = 35.0
     @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
@@ -39,6 +54,7 @@ struct ControlPanel: View {
          defaultViewingDistance: Double, status: String,
          recenter: @escaping () -> Void, fillWindow: @escaping () -> Void,
          chooseImage: @escaping () -> Void, clearImage: @escaping () -> Void,
+         hasScene: Bool, useScene: @escaping () -> Void,
          calibrate: @escaping () -> Void, isEdgeToEdge: Bool, toggleEdgeToEdge: @escaping () -> Void,
          hide: @escaping () -> Void) {
         self.cardWidth = cardWidth
@@ -51,6 +67,8 @@ struct ControlPanel: View {
         self.fillWindow = fillWindow
         self.chooseImage = chooseImage
         self.clearImage = clearImage
+        self.hasScene = hasScene
+        self.useScene = useScene
         self.calibrate = calibrate
         self.isEdgeToEdge = isEdgeToEdge
         self.toggleEdgeToEdge = toggleEdgeToEdge
@@ -93,6 +111,7 @@ struct ControlPanel: View {
 
             switch tab {
             case .card: cardControls
+            case .scene: sceneControls
             case .effects: effectControls
             case .viewer: viewerControls
             }
@@ -122,12 +141,21 @@ struct ControlPanel: View {
                     .disabled(mode == .flat)
             }
 
-            HStack(spacing: 10) {
-                Text("Card width")
-                // Dragging the width takes the card back out of filling the window.
-                Slider(value: Binding(get: { cardFill }, set: { cardFill = $0; fillsWindow = false }),
-                       in: 0.1...2.5)
-                valueLabel("\(cardWidth.formatted(.number.precision(.fractionLength(1)))) cm")
+            Grid(horizontalSpacing: 10, verticalSpacing: 6) {
+                GridRow {
+                    Text("Card width").gridColumnAlignment(.leading)
+                    // Dragging the width takes the card back out of filling the window.
+                    Slider(value: Binding(get: { cardFill }, set: { cardFill = $0; fillsWindow = false }),
+                           in: 0.1...2.5)
+                    valueLabel("\(cardWidth.formatted(.number.precision(.fractionLength(1)))) cm")
+                }
+                GridRow {
+                    Text("Corners")
+                    Slider(value: $cornerRadius, in: 0...10)
+                    valueLabel("\(cornerRadius.formatted(.number.precision(.fractionLength(1)))) mm")
+                }
+                .help("Rounds the card's corners. To match your screen's own: Fill Window at your usual angle, "
+                      + "then adjust until the card's top corners sit exactly in the screen's rounded corners.")
             }
             .font(.callout)
 
@@ -136,13 +164,97 @@ struct ControlPanel: View {
 
             HStack {
                 Button(hasImage ? "Change Image…" : "Choose Image…", action: chooseImage)
-                if hasImage {
-                    Button("Use Checkerboard", action: clearImage)
+                    .help("Or drop an image on the window.")
+                Button("Desert Scene", action: useScene)
+                    .disabled(hasScene)
+                    .help("A layered picture: sand, mountains and sky come toward you at different speeds as "
+                          + "the lid moves, while the clock stays put.")
+                if hasImage || hasScene {
+                    Button("Checkerboard", action: clearImage)
                 }
-                Spacer()
-                Text("or drop one on the window")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var sceneControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !hasScene {
+                HStack {
+                    Button("Desert Scene", action: useScene)
+                    Text("A layered picture whose layers come toward you as the lid moves.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                    GridRow {
+                        Text("Parallax")
+                        Slider(value: $parallax)
+                        valueLabel(percent(parallax))
+                    }
+                    .help("How strongly the layers come toward you as the lid moves: the sand most, the "
+                          + "mountains less, the sky barely.")
+                    GridRow {
+                        Text("Comes closer")
+                        Picker("Comes closer", selection: $parallaxDirection) {
+                            ForEach(LidDirection.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .fixedSize()
+                        .gridCellColumns(2)
+                    }
+
+                    Divider().padding(.vertical, 4)
+
+                    GridRow {
+                        Text("Clock").font(.headline)
+                        Toggle("Show the date and time", isOn: $showsClock)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                            .gridCellColumns(2)
+                            .gridCellAnchor(.trailing)
+                    }
+                    if showsClock {
+                        GridRow {
+                            Text("Width")
+                            Slider(value: $clockWidth, in: 30...150)
+                            valueLabel("\(Int(clockWidth.rounded()))")
+                        }
+                        .help("SF Pro's width axis: 30 is very compressed, 100 normal, 150 very expanded.")
+                        GridRow {
+                            Text("Weight")
+                            Slider(value: $clockWeight, in: 100...900)
+                            valueLabel("\(Int(clockWeight.rounded()))")
+                        }
+                        .help("SF Pro's weight axis: 100 is thin, 400 regular, 900 heavy.")
+                        GridRow {
+                            Text("Height")
+                            Slider(value: $clockStretch, in: 1...2.2)
+                            valueLabel("\(clockStretch.formatted(.number.precision(.fractionLength(1))))×")
+                        }
+                        .help("Stretches the numerals taller, like a lock screen's clock.")
+                        GridRow {
+                            Text("Opacity")
+                            Slider(value: $clockOpacity)
+                            valueLabel(percent(clockOpacity))
+                        }
+                        GridRow {
+                            Text("Blend")
+                            Picker("Blend", selection: $clockBlend) {
+                                ForEach(ClockBlend.allCases, id: \.self) { Text($0.label).tag($0) }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .fixedSize()
+                            .gridCellColumns(2)
+                        }
+                        .help("How the clock mixes with the picture behind it. Plus Lighter and Screen let the "
+                              + "sky's color show through, like frosted glass.")
+                    }
+                }
+                .font(.callout)
             }
         }
     }

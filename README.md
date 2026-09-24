@@ -39,20 +39,31 @@ for the widest range of motion.
   wallpaper. Depth blur still works: it comes from how far each part of the screen has moved away
   since the anchored angle, which depends only on its height up the screen and the lid angle.
 
-The controls are in three tabs. Press **X** to hide or show them, and **F** (or the button beside
+The controls are in four tabs. Press **X** to hide or show them, and **F** (or the button beside
 the ×) to go full screen edge to edge: unlike macOS's own full screen, it also covers the strips
 beside the camera notch, with the menu bar and Dock hidden. Press **F** or **Esc** to leave.
 
-- **Card**: the mode, *Card width* (up to 2.5× the window), and **Choose Image…** to use your own
+- **Card**: the mode, *Card width* (up to 2.5× the window), *Corners* (the card's corner radius, to
+  match the screen's own rounded corners; macOS doesn't report them, so it starts at an estimated
+  3 mm), and **Choose Image…** to use your own
   picture instead of the checkerboard (or drop an image file on the window). The card takes the
-  image's shape. **Fill Window** stretches the card over the whole window (cropping the image to
+  image's shape. **Desert Scene** shows a layered picture instead (sky, mountains and sand, from
+  `Resources/Scene`). **Fill Window** stretches the card over the whole window (cropping the image to
   fit), switches to *As placed*, and anchors at the current lid angle, so at that angle it covers
   the window edge to edge and the effects start from there.
+- **Scene**: for the Desert Scene. As the lid moves away from the anchored angle, the layers come
+  toward you at different speeds, the sand fastest, the mountains less and the sky barely; *Parallax*
+  sets how strongly and *Comes closer* which lid movement does it. The date and time sit between the
+  sky and the mountains, in SF Pro's variable font set like a phone's lock screen (narrow, medium
+  weight, fading slightly toward the bottom), adjustable with *Width*, *Weight*, a *Height* stretch,
+  *Opacity* and a *Blend* mode. They dim with the rest of the scene but stay sharp, and don't move
+  with the parallax.
 - **Effects**: a blur, with a *Strength*, a *Dim* that darkens the blurred parts to match (most
   where the blur is strongest), and what it's *Based on*:
   - **Depth (3D)** works like a lens focused on the screen: parts that end up farther away than
     where your eyes are focused go soft, starting as soon as they leave focus and growing steadily
-    with distance, with their edges melting into the background. In *Flat* mode that's the parts of
+    with distance. The card's rounded outline softens with it, fading in and spilling out the way an
+    out-of-focus object's edge does, and stays crisp wherever the picture is sharp. In *Flat* mode that's the parts of
     the screen tipping away from you as the lid opens; in the other modes it's the card as the screen
     moves in front of it. *Full at* sets how far gives the full blur, and *Blurs* picks what goes
     soft: things farther away (the default), closer, or both.
@@ -63,9 +74,10 @@ beside the camera notch, with the menu bar and Dock hidden. Press **F** or **Esc
     come in from the window's edges, since the image's own edges move off-screen as the lid tilts.
 
   The blur is drawn by a Metal shader in one pass. When a picture loads, Core Image makes the sharp
-  copy and eight progressively blurrier ones once, each with room for its blur to spill past the
-  picture's edges, and packs them into one texture. Each frame the shader works out how blurred each
-  pixel should be and blends the two nearest copies.
+  copy and eight progressively blurrier ones once and packs them into one texture. Each frame the
+  shader works out how blurred each pixel should be, blends the two nearest copies, and softens the
+  card's rounded outline to match. A layered scene is drawn whole first and then shaped by the
+  outline once, so its layers don't show through each other at the edge.
 - **Viewer**: where the card is drawn for.
   - **From the screen** (the default) needs no settings: everything comes from the display's real
     size, which macOS reports (29.05 × 18.89 cm on a 13.6-inch M4 MacBook Air), and the lid angle.

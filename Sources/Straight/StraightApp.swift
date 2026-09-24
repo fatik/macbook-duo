@@ -43,6 +43,8 @@ struct ContentView: View {
     /// How much of the window the card may fill, in both directions.
     @AppStorage("cardSize") private var cardFill = 0.45
     @AppStorage("imagePath") private var imagePath = ""
+    /// The card's corner radius in millimeters, to match the screen's own rounded corners.
+    @AppStorage("cornerRadius") private var cornerRadius = ControlPanel.defaultCornerRadius
     /// Whether the card covers the whole window instead of following the card width setting.
     @AppStorage("fillsWindow") private var fillsWindow = false
     private var blur = StoredEffect("blur", edge: .top)
@@ -50,6 +52,20 @@ struct ContentView: View {
     /// The checkerboard as a picture, so it can go through the blur shader like a photo.
     @State private var checkerboard: CGImage?
     @State private var atlas: BlurAtlas?
+    /// A layered picture with parallax, shown instead of the image or checkerboard.
+    @AppStorage("scene") private var sceneName = ""
+    @State private var scene: ParallaxScene?
+    @State private var sceneAtlases: [BlurAtlas] = []
+    /// How strongly the scene's layers come toward you as the lid moves, from 0 to 1.
+    @AppStorage("parallax") private var parallax = 0.6
+    @AppStorage("parallaxDirection") private var parallaxDirection: LidDirection = .either
+    @AppStorage("showsClock") private var showsClock = true
+    @AppStorage("clockWeight") private var clockWeight = ClockStyle.phone.weight
+    @AppStorage("clockWidth") private var clockWidth = ClockStyle.phone.width
+    @AppStorage("clockStretch") private var clockStretch = ClockStyle.phone.stretch
+    @AppStorage("clockOpacity") private var clockOpacity = 1.0
+    @AppStorage("clockBlend") private var clockBlend: ClockBlend = .normal
+    @State private var clockAtlas: BlurAtlas?
     @State private var isChoosingImage = false
     @State private var isDropTargeted = false
     @State private var showsControls = true
@@ -58,8 +74,9 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-            // The card takes the image's shape, or 3:2 for the checkerboard.
-            let aspect = image.map { min(max(Double($0.width) / Double($0.height), 0.2), 5) } ?? 1.5
+            // The card takes the image's shape, or 3:2 for the checkerboard and scenes.
+            let aspect = scene != nil ? ParallaxScene.aspect
+                : image.map { min(max(Double($0.width) / Double($0.height), 0.2), 5) } ?? 1.5
             let cardWidth = min(size.width * cardFill, size.height * cardFill * aspect)
             let cardSize = fillsWindow ? size : CGSize(width: cardWidth, height: cardWidth / aspect)
 
@@ -97,9 +114,9 @@ struct ContentView: View {
 
                     // Hidden rather than drawn uncorrected when the lid is too far closed to draw it.
                     Color.clear.overlay {
-                        if let atlas, let pose {
-                            // The shader draws past the card on every side, so the blur can spread
-                            // beyond its edges, and that bigger area is held in space the same way.
+                        if let pose {
+                            // The view reaches past the card so its outline can soften and spill out as
+                            // far as the blur spreads, and that bigger area is held in space the same way.
                             let margin = blurMargin(cardSize: cardSize, strength: blur.strength,
                                                     shape: blur.shape(lidAngle: sensor.angle, anchorAngle: anchor,
                                                                       pose: pose, window: nil))
@@ -113,18 +130,54 @@ struct ContentView: View {
                                                                          y: renderFrame.minY - placement.frame.minY)
                                 let shape = blur.shape(lidAngle: sensor.angle, anchorAngle: anchor, pose: pose,
                                                        window: fillsWindow ? (toWindow, size) : nil)
-                                BlurredCard(atlas: atlas, values: blurShaderValues(
-                                    strength: blur.strength, dim: blur.dim, shape: shape, atlas: atlas,
-                                    cardSize: cardSize, margin: margin, crops: fillsWindow && image != nil))
-                                .frame(width: renderFrame.width, height: renderFrame.height)
-                                .projectionEffect(transform)
+                                // Corners the same size on screen whatever the card's size.
+                                let corner = cornerRadius / 10 / placement.cmPerPoint * sharpness
+                                let values = { (atlas: BlurAtlas, strength: Double, rect: CGRect?, shapesEdge: Bool) in
+                                    blurShaderValues(strength: strength, dim: blur.dim, shape: shape, atlas: atlas,
+                                                     cardSize: cardSize, margin: margin,
+                                                     crops: rect == nil && fillsWindow && image != nil,
+                                                     pictureRect: rect, cornerRadius: corner, shapesEdge: shapesEdge)
+                                }
+
+                                if let scene, sceneAtlases.count == scene.layers.count {
+                                    // The layers come toward you as the lid moves away from where the card
+                                    // was anchored, the nearest fastest; the clock stays put.
+                                    let closer = parallax * ParallaxScene.closestZoom
+                                        * travel(from: anchor, to: rig.lidAngle, direction: parallaxDirection)
+                                    ZStack {
+                                        ForEach(scene.layers.indices, id: \.self) { index in
+                                            // The clock sits between layers and dims with them, but stays sharp.
+                                            if index == scene.clockBefore, showsClock, let clockAtlas {
+                                                BlurredCard(atlas: clockAtlas, values: values(
+                                                    clockAtlas, 0, CGRect(x: 0, y: 0, width: 1, height: 1), false))
+                                                .opacity(clockOpacity)
+                                                .blendMode(clockBlend.mode)
+                                            }
+                                            BlurredCard(atlas: sceneAtlases[index], values: values(
+                                                sceneAtlases[index], blur.strength,
+                                                ParallaxScene.rect(for: scene.layers[index],
+                                                                   cardAspect: cardSize.width / cardSize.height,
+                                                                   closer: closer),
+                                                false))
+                                        }
+                                        // The whole stack shaped by the card's outline at once.
+                                        CardOutside(values: values(sceneAtlases[0], blur.strength, nil, true))
+                                    }
+                                    .frame(width: renderFrame.width, height: renderFrame.height)
+                                    .projectionEffect(transform)
+                                } else if let atlas {
+                                    BlurredCard(atlas: atlas, values: values(atlas, blur.strength, nil, true))
+                                        .frame(width: renderFrame.width, height: renderFrame.height)
+                                        .projectionEffect(transform)
+                                } else if let source, let cardTransform = pose.transform(from: rendered(cardFrame)) {
+                                    // Until the blur's copies are ready.
+                                    Image(decorative: source, scale: 1)
+                                        .resizable()
+                                        .clipShape(.rect(cornerRadius: corner))
+                                        .frame(width: rendered(cardFrame).width, height: rendered(cardFrame).height)
+                                        .projectionEffect(cardTransform)
+                                }
                             }
-                        } else if let source, let transform = pose?.transform(from: rendered(cardFrame)) {
-                            // Until the blur's copies are ready.
-                            Image(decorative: source, scale: 1)
-                                .resizable()
-                                .frame(width: rendered(cardFrame).width, height: rendered(cardFrame).height)
-                                .projectionEffect(transform)
                         }
                     }
                     // The sharp copy only needs to be about as big as the card is drawn; a bigger one
@@ -141,6 +194,49 @@ struct ContentView: View {
                         if let made = await BlurAtlas.make(from: source, longSide: min(request.longSide, 3456),
                                                            aspect: request.aspect) {
                             atlas = made
+                        }
+                    }
+                    // Each layer of a scene gets its own copies; the sky is trimmed to the card's shape.
+                    .task(id: scene.map { SceneAtlasRequest(scene: $0.name,
+                                                            longSide: AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 3),
+                                                            aspect: (Double(cardSize.width / cardSize.height) * 100).rounded() / 100) }) {
+                        guard let scene else { return sceneAtlases = [] }
+                        let longSide = min(AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 3), 3456)
+                        var made: [BlurAtlas] = []
+                        let cardAspect = Double(cardSize.width / cardSize.height)
+                        for layer in scene.layers {
+                            // Every layer's strongest blur is the same share of the card, whatever
+                            // part of it the layer covers.
+                            var fills = true, widthOnCard = 1.0
+                            if case .band(_, let width) = layer.placement { fills = false; widthOnCard = width }
+                            guard let atlas = await BlurAtlas.make(from: layer.image, longSide: longSide,
+                                                                   aspect: fills ? cardAspect : nil,
+                                                                   blurPerWidth: 1 / (widthOnCard * cardAspect * 8))
+                            else { return }
+                            made.append(atlas)
+                        }
+                        sceneAtlases = made
+                    }
+                    // The clock is redrawn as a picture whenever its style or the card changes, and
+                    // again at the start of every minute.
+                    .task(id: scene != nil && showsClock ? ClockRequest(
+                        style: ClockStyle(weight: clockWeight, width: clockWidth, stretch: clockStretch),
+                        longSide: AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 3),
+                        aspect: (Double(cardSize.width / cardSize.height) * 100).rounded() / 100) : nil) {
+                        guard scene != nil, showsClock else { return clockAtlas = nil }
+                        let longSide = min(AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 3), 3456)
+                        let aspect = Double(cardSize.width / cardSize.height)
+                        let pixels = aspect >= 1 ? CGSize(width: longSide, height: longSide / aspect)
+                                                 : CGSize(width: longSide * aspect, height: longSide)
+                        let style = ClockStyle(weight: clockWeight, width: clockWidth, stretch: clockStretch)
+                        while !Task.isCancelled {
+                            let now = Date()
+                            if let picture = ParallaxScene.renderClock(at: now, pixelSize: pixels, style: style),
+                               let made = await BlurAtlas.make(from: picture, longSide: longSide) {
+                                clockAtlas = made
+                            }
+                            let nextMinute = (now.timeIntervalSince1970 / 60).rounded(.down) * 60 + 60.05
+                            try? await Task.sleep(for: .seconds(nextMinute - Date().timeIntervalSince1970))
                         }
                     }
 
@@ -161,7 +257,19 @@ struct ContentView: View {
                                     anchorAngle = sensor.angle
                                 },
                                 chooseImage: { isChoosingImage = true },
-                                clearImage: { image = nil; imagePath = "" },
+                                clearImage: {
+                                    image = nil
+                                    imagePath = ""
+                                    scene = nil
+                                    sceneName = ""
+                                },
+                                hasScene: scene != nil,
+                                useScene: {
+                                    scene = ParallaxScene.desert()
+                                    sceneName = scene?.name ?? ""
+                                    image = nil
+                                    imagePath = ""
+                                },
                                 calibrate: { calibrate(cameraFromHinge: rig.cameraFromHinge) },
                                 isEdgeToEdge: isEdgeToEdge,
                                 toggleEdgeToEdge: { EdgeToEdge.shared.toggle() },
@@ -216,6 +324,7 @@ struct ContentView: View {
         .onAppear {
             anchorAngle = sensor.angle
             checkerboard = renderCheckerboard()
+            if sceneName == "desert" { scene = ParallaxScene.desert() }
             if !imagePath.isEmpty, !useImage(at: URL(fileURLWithPath: imagePath)) { imagePath = "" }
         }
         .task(id: showsControls) {
@@ -239,6 +348,16 @@ struct ContentView: View {
         withAnimation(.easeInOut(duration: 0.2)) { showsControls.toggle() }
     }
 
+    /// How far the lid has moved from `anchor` toward `direction`, from 0 to 1 at 45°.
+    private func travel(from anchor: Double, to angle: Double, direction: LidDirection) -> Double {
+        let moved = switch direction {
+        case .opening: angle - anchor
+        case .closing: anchor - angle
+        case .either: abs(angle - anchor)
+        }
+        return min(max(moved / 45, 0), 1)
+    }
+
     private func calibrate(cameraFromHinge: Double) {
         calibrator.start(cameraFromHinge: cameraFromHinge, lidAngle: { [sensor] in sensor.reading }) { distance, height in
             withAnimation(.easeInOut(duration: 0.4)) {
@@ -252,6 +371,8 @@ struct ContentView: View {
     private func useImage(at url: URL) -> Bool {
         guard let loaded = loadCardImage(at: url) else { return false }
         image = loaded
+        scene = nil
+        sceneName = ""
         imagePath = url.path
         return true
     }
