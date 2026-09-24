@@ -1,36 +1,23 @@
 import SwiftUI
 
-/// Where a gradient effect is strongest: one edge of the card, or all of them.
+/// What the blur follows: a fade in from one edge of the card, or all of them, or the card's real
+/// depth, strongest where it's farthest from the screen.
 enum EffectEdge: String, CaseIterable {
-    case top, bottom, left, right, around
+    case top, bottom, left, right, around, depth
 
     var label: String {
         switch self {
-        case .top: "Top"
-        case .bottom: "Bottom"
-        case .left: "Left"
-        case .right: "Right"
+        case .top: "Top edge"
+        case .bottom: "Bottom edge"
+        case .left: "Left edge"
+        case .right: "Right edge"
         case .around: "All edges"
-        }
-    }
-
-    /// A gradient laid out by distance from this edge: location 0 is at the edge and 1 is as far in
-    /// as the card goes (the far side, or the middle for `.around`).
-    func style(_ stops: [Gradient.Stop]) -> AnyShapeStyle {
-        switch self {
-        case .around:
-            let inward = stops.reversed().map { Gradient.Stop(color: $0.color, location: 1 - $0.location) }
-            return AnyShapeStyle(EllipticalGradient(stops: inward, center: .center,
-                                                    startRadiusFraction: 0, endRadiusFraction: 0.5))
-        case .top: return AnyShapeStyle(LinearGradient(stops: stops, startPoint: .top, endPoint: .bottom))
-        case .bottom: return AnyShapeStyle(LinearGradient(stops: stops, startPoint: .bottom, endPoint: .top))
-        case .left: return AnyShapeStyle(LinearGradient(stops: stops, startPoint: .leading, endPoint: .trailing))
-        case .right: return AnyShapeStyle(LinearGradient(stops: stops, startPoint: .trailing, endPoint: .leading))
+        case .depth: "Depth (3D)"
         }
     }
 }
 
-/// Which lid movement makes an effect reach further into the card.
+/// Which lid movement makes an edge fade reach further into the card.
 enum LidDirection: String, CaseIterable {
     case opening, closing, either
 
@@ -41,10 +28,23 @@ enum LidDirection: String, CaseIterable {
         case .either: "Moved either way"
         }
     }
+
 }
 
-/// Settings for a blur or darkening that is strongest at an edge of the card and fades toward the
-/// middle, kept in user defaults under keys starting with `prefix`.
+/// Which parts depth blur applies to: those farther away than where the eye is focused, nearer, or both.
+enum DepthSide: String, CaseIterable {
+    case farther, nearer, either
+
+    var label: String {
+        switch self {
+        case .farther: "Farther away"
+        case .nearer: "Closer"
+        case .either: "Both"
+        }
+    }
+}
+
+/// Settings for the blur, kept in user defaults under keys starting with `prefix`.
 struct StoredEffect: DynamicProperty {
     /// 0 is off, 1 is the strongest.
     @AppStorage var strength: Double
@@ -55,8 +55,14 @@ struct StoredEffect: DynamicProperty {
     /// angle, growing to `spread` once the lid has moved `fullReachAfter` degrees in `lidDirection`.
     @AppStorage var lidReaction: Double
     @AppStorage var lidDirection: LidDirection
+    /// Which side of the focus depth blur applies to.
+    @AppStorage var depthSide: DepthSide
+    /// How much the blurred parts also darken, from 0 (not at all) to 1 (black where the blur is full).
+    @AppStorage var dim: Double
 
     static let fullReachAfter = 45.0
+    /// For depth effects, how far from the screen `spread` of 1 takes to reach full strength.
+    static let fullDepthAtMost = 20.0
 
     init(_ prefix: String, edge: EffectEdge) {
         _strength = AppStorage(wrappedValue: 0, prefix + "Strength")
@@ -64,132 +70,44 @@ struct StoredEffect: DynamicProperty {
         _edge = AppStorage(wrappedValue: edge, prefix + "Edge")
         _lidReaction = AppStorage(wrappedValue: 0, prefix + "LidReaction")
         _lidDirection = AppStorage(wrappedValue: .either, prefix + "LidDirection")
+        _depthSide = AppStorage(wrappedValue: .farther, prefix + "DepthSide")
+        _dim = AppStorage(wrappedValue: 0, prefix + "Dim")
     }
 
-    /// Where the effect sits at this lid angle. Its fade keeps the same length (`spread`) and slides
-    /// in from the edge as the lid moves, so a little movement gives a faint trace and more movement
-    /// a stronger, deeper one.
-    func ramp(lidAngle: Double, anchorAngle: Double) -> EffectRamp {
+    /// For depth effects, how far from the screen in centimeters it takes to reach full strength.
+    var fullDepth: Double { spread * Self.fullDepthAtMost }
+
+    /// Where the effect is at this lid angle, for a card drawn as `pose`.
+    ///
+    /// An edge fade keeps the same length (`spread`) and slides in from the edge as the lid moves, so
+    /// a little movement gives a faint trace and more a stronger, deeper one. A depth effect follows
+    /// how far each part of the card is from the screen instead, which the lid changes by itself.
+    /// `window` is where an edge fade goes instead of the card, when the card fills the window and
+    /// its own edges move off-screen.
+    func shape(lidAngle: Double, anchorAngle: Double, pose: CardPose,
+               window: (toWindow: ProjectionTransform, size: CGSize)?) -> BlurShape {
+        guard strength > 0 || dim > 0 else { return .none }
+        if edge == .depth {
+            return .depth(top: pose.depthAtTop, bottom: pose.depthAtBottom, full: fullDepth, side: depthSide)
+        }
         let moved = switch lidDirection {
         case .opening: lidAngle - anchorAngle
         case .closing: anchorAngle - lidAngle
         case .either: abs(lidAngle - anchorAngle)
         }
         let travel = min(max(moved / Self.fullReachAfter, 0), 1)
-        return EffectRamp(front: spread * (1 - lidReaction * (1 - travel)), width: spread)
+        let ramp = EffectRamp(front: spread * (1 - lidReaction * (1 - travel)), width: spread)
+        if let window {
+            return .windowEdge(edge, ramp, toWindow: window.toWindow, windowSize: window.size)
+        }
+        return .cardEdge(edge, ramp)
     }
 }
 
-/// How much of an effect there is at each distance from its edge, as fractions of the way across:
-/// none past `front`, easing up to full `width` closer to the edge.
+
+/// How far an edge fade reaches, as fractions of the way across: none past `front`, easing up to
+/// full `width` closer to the edge.
 struct EffectRamp {
     var front: Double
     var width: Double
-
-    /// The effect's amount, from 0 to 1, at distance `d` from the edge.
-    func amount(at d: Double) -> Double {
-        let x = min(max((front - d) / width, 0), 1)
-        // Smootherstep: flat at both ends, so the fade has no visible start or finish.
-        return x * x * x * (x * (6 * x - 15) + 10)
-    }
-
-    /// The most there is anywhere, which is right at the edge.
-    var peak: Double { amount(at: 0) }
-
-    /// Gradient stops that follow `color(amount)` inward from the edge, sampled finely across the
-    /// stretch where the amount changes so the gradient doesn't band.
-    func stops(_ color: (Double) -> Color) -> [Gradient.Stop] {
-        let start = min(max(front - width, 0), 1), end = min(max(front, 0), 1)
-        let samples = 32
-        var locations: [Double] = [0]
-        for step in 0...samples {
-            locations.append(start + (end - start) * Double(step) / Double(samples))
-        }
-        locations.append(1)
-        return locations.map { Gradient.Stop(color: color(amount(at: $0)), location: $0) }
-    }
-}
-
-/// Blurs `content` more and more toward `edge`, following `ramp`: `radius` where the ramp is full,
-/// none where it's empty. Built from a stack of increasingly blurred copies, each fading in as the
-/// ramp rises past its level, so the blur grows smoothly instead of in steps. Each copy is drawn at
-/// a fraction of full resolution, since blur hides the lost detail anyway.
-struct ProgressiveBlur<Content: View>: View {
-    var radius: CGFloat
-    var ramp: EffectRamp
-    var edge: EffectEdge
-    /// Whether the content fills its frame, so blurring shouldn't soften its outline.
-    var isOpaque: Bool
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        GeometryReader { geometry in
-            let size = geometry.size
-            ZStack(alignment: .topLeading) {
-                content.frame(width: size.width, height: size.height)
-                if radius > 0.25 {
-                    ForEach(blurLevels.indices, id: \.self) { index in
-                        let level = blurLevels[index]
-                        let below = index == 0 ? 0 : blurLevels[index - 1]
-                        // Copies whose level the ramp never reaches would be invisible anyway.
-                        if ramp.peak > below {
-                            blurred(by: radius * level, size: size) { amount in
-                                min(max((amount - below) / (level - below), 0), 1)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// A copy blurred by `radius` points and shown where `visibility(amount)` says, drawn shrunk and
-    /// scaled back up: at a quarter of the size each way it's a sixteenth of the pixels to draw,
-    /// blur and mask, and the blur hides the difference.
-    private func blurred(by radius: CGFloat, size: CGSize, visibility: @escaping (Double) -> Double) -> some View {
-        let shrink = downscale(forBlur: radius)
-        // Whole points, or the rounding shows up as a sliver along the edge once scaled back up.
-        let small = CGSize(width: (size.width / shrink).rounded(.up), height: (size.height / shrink).rounded(.up))
-        let scale = CGSize(width: small.width / size.width, height: small.height / size.height)
-        return content
-            .frame(width: size.width, height: size.height)
-            .scaleEffect(scale, anchor: .topLeading)
-            .frame(width: small.width, height: small.height, alignment: .topLeading)
-            // Flattened, so layered content (a card with an outline, or a warped card over the
-            // backdrop) blurs as one picture instead of as stacked copies.
-            .drawingGroup()
-            .blur(radius: radius * scale.width, opaque: isOpaque)
-            // Masked while still small: the mask is a smooth gradient, so it loses nothing.
-            .mask { Rectangle().fill(edge.style(ramp.stops { .black.opacity(visibility($0)) })) }
-            .scaleEffect(CGSize(width: 1 / scale.width, height: 1 / scale.height), anchor: .topLeading)
-            .frame(width: size.width, height: size.height, alignment: .topLeading)
-    }
-}
-
-/// How much to shrink a copy before blurring it: as much as possible while the blur still spans a
-/// couple of points at the smaller size, which keeps scaling it back up invisible.
-private func downscale(forBlur radius: CGFloat) -> CGFloat {
-    switch radius {
-    case ..<2: 1
-    case ..<6: 2
-    case ..<12: 4
-    default: 8
-    }
-}
-
-/// Each blurred copy's share of the full blur. They bunch up at the low end, where a little blur is
-/// most noticeable.
-private let blurLevels = (1...8).map { pow(Double($0) / 8, 2) }
-
-/// Black that follows `ramp`: `opacity` strong where it's full, fading smoothly to nothing.
-struct EdgeDarkness: View {
-    var opacity: Double
-    var ramp: EffectRamp
-    var edge: EffectEdge
-
-    var body: some View {
-        Rectangle()
-            .fill(edge.style(ramp.stops { .black.opacity(opacity * $0) }))
-            .allowsHitTesting(false)
-    }
 }

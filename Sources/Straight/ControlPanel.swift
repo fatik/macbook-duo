@@ -7,6 +7,8 @@ struct ControlPanel: View {
     var hasImage: Bool
     var canCalibrate: Bool
     var calibrator: EyeCalibrator
+    /// The viewing distance `Viewpoint.screen` assumes unless it's been changed, in centimeters.
+    var defaultViewingDistance: Double
     var status: String
     var recenter: () -> Void
     var fillWindow: () -> Void
@@ -27,10 +29,14 @@ struct ControlPanel: View {
     @AppStorage("fillsWindow") private var fillsWindow = false
     @AppStorage("eyeDistance") private var eyeDistance = 55.0
     @AppStorage("eyeHeight") private var eyeHeight = 35.0
+    @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
+    @AppStorage("viewSensitivity") private var sensitivity = 1.0
+    @AppStorage("viewDistance") private var viewDistance = 0.0
+    @AppStorage("viewLookingDown") private var lookingDown = 0.0
     private var blur = StoredEffect("blur", edge: .top)
-    private var darkness = StoredEffect("darkness", edge: .bottom)
 
-    init(cardWidth: Double, hasImage: Bool, canCalibrate: Bool, calibrator: EyeCalibrator, status: String,
+    init(cardWidth: Double, hasImage: Bool, canCalibrate: Bool, calibrator: EyeCalibrator,
+         defaultViewingDistance: Double, status: String,
          recenter: @escaping () -> Void, fillWindow: @escaping () -> Void,
          chooseImage: @escaping () -> Void, clearImage: @escaping () -> Void,
          calibrate: @escaping () -> Void, isEdgeToEdge: Bool, toggleEdgeToEdge: @escaping () -> Void,
@@ -39,6 +45,7 @@ struct ControlPanel: View {
         self.hasImage = hasImage
         self.canCalibrate = canCalibrate
         self.calibrator = calibrator
+        self.defaultViewingDistance = defaultViewingDistance
         self.status = status
         self.recenter = recenter
         self.fillWindow = fillWindow
@@ -97,7 +104,9 @@ struct ControlPanel: View {
         }
         .padding(14)
         .frame(width: 440)
-        .background(.regularMaterial, in: .rect(cornerRadius: 14))
+        // Solid rather than frosted glass: frosting would re-blur the moving card behind it every frame.
+        .background(Color(white: 0.12).opacity(0.94), in: .rect(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
     }
 
     private var cardControls: some View {
@@ -119,10 +128,11 @@ struct ControlPanel: View {
                 Slider(value: Binding(get: { cardFill }, set: { cardFill = $0; fillsWindow = false }),
                        in: 0.1...2.5)
                 valueLabel("\(cardWidth.formatted(.number.precision(.fractionLength(1)))) cm")
-                Button("Fill Window", action: fillWindow)
-                    .help("Stretch the card over the whole window, held in place from the current lid angle.")
             }
             .font(.callout)
+
+            Button("Fill Window", action: fillWindow)
+                .help("Stretch the card over the whole window, held in place from the current lid angle.")
 
             HStack {
                 Button(hasImage ? "Change Image…" : "Choose Image…", action: chooseImage)
@@ -140,8 +150,6 @@ struct ControlPanel: View {
     private var effectControls: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
             effectRows("Blur", blur)
-            Divider().padding(.vertical, 4)
-            effectRows("Darkness", darkness)
         }
         .font(.callout)
     }
@@ -150,7 +158,7 @@ struct ControlPanel: View {
     private func effectRows(_ title: String, _ effect: StoredEffect) -> some View {
         GridRow {
             Text(title).font(.headline)
-            Picker("Starts from", selection: effect.$edge) {
+            Picker("Based on", selection: effect.$edge) {
                 ForEach(EffectEdge.allCases, id: \.self) { Text($0.label).tag($0) }
             }
             .pickerStyle(.menu)
@@ -164,33 +172,122 @@ struct ControlPanel: View {
             valueLabel(percent(effect.strength))
         }
         GridRow {
-            Text("Reach")
-            Slider(value: effect.$spread, in: 0.05...1)
-            valueLabel(percent(effect.spread))
+            Text("Dim")
+            Slider(value: effect.$dim)
+            valueLabel(percent(effect.dim))
         }
-        .help("How far in from the edge it goes, at most.")
-        GridRow {
-            Text("Lid reaction")
-            Slider(value: effect.$lidReaction)
-            valueLabel(percent(effect.lidReaction))
-        }
-        .help("How much the lid slides the effect in. At 0% it stays put. At 100% there's none at the anchored "
-              + "angle, and it slides in from the edge as the lid moves, all the way after "
-              + "\(Int(StoredEffect.fullReachAfter))°.")
-        GridRow {
-            Text("Grows when")
-            Picker("Grows when", selection: effect.$lidDirection) {
-                ForEach(LidDirection.allCases, id: \.self) { Text($0.label).tag($0) }
+        .help("How much the blurred parts also darken, most where the blur is strongest. "
+              + "At 100% they go black where the blur is full.")
+
+        if effect.edge == .depth {
+            // Depth already moves with the lid, so there's no lid reaction to set.
+            GridRow {
+                Text("Full at")
+                Slider(value: effect.$spread, in: 0.05...1)
+                valueLabel("\(Int(effect.fullDepth.rounded())) cm")
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .fixedSize()
-            .gridCellColumns(2)
-            .disabled(effect.lidReaction == 0)
+            .help("How much farther away (or nearer) than the screen a part has to be to get the full blur. "
+                  + "What's in focus stays sharp.")
+            GridRow {
+                Text("Blurs")
+                Picker("Blurs", selection: effect.$depthSide) {
+                    ForEach(DepthSide.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                .gridCellColumns(2)
+            }
+        } else {
+            GridRow {
+                Text("Reach")
+                Slider(value: effect.$spread, in: 0.05...1)
+                valueLabel(percent(effect.spread))
+            }
+            .help("How far in from the edge it goes, at most.")
+            GridRow {
+                Text("Lid reaction")
+                Slider(value: effect.$lidReaction)
+                valueLabel(percent(effect.lidReaction))
+            }
+            .help("How much the lid slides the effect in. At 0% it stays put. At 100% there's none at the anchored "
+                  + "angle, and it slides in from the edge as the lid moves, all the way after "
+                  + "\(Int(StoredEffect.fullReachAfter))°.")
+            GridRow {
+                Text("Grows when")
+                Picker("Grows when", selection: effect.$lidDirection) {
+                    ForEach(LidDirection.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                .gridCellColumns(2)
+                .disabled(effect.lidReaction == 0)
+            }
         }
     }
 
     private var viewerControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Picker("Viewpoint", selection: $viewpoint) {
+                    ForEach(Viewpoint.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Button("Reset") {
+                    sensitivity = 1
+                    viewDistance = 0
+                    lookingDown = 0
+                }
+                .disabled(sensitivity == 1 && viewDistance == 0 && lookingDown == 0)
+            }
+
+            Grid(horizontalSpacing: 10, verticalSpacing: 6) {
+                GridRow {
+                    Text("Sensitivity").gridColumnAlignment(.leading)
+                    Slider(value: $sensitivity, in: 0.25...2)
+                    valueLabel(percent(sensitivity))
+                }
+                .help("How much the lid's movement counts. Raise it if the picture doesn't move enough to stay "
+                      + "put as you tilt the lid, lower it if it moves too much.")
+                if viewpoint == .screen {
+                    GridRow {
+                        Text("Distance")
+                        Slider(value: Binding(get: { viewDistance > 0 ? viewDistance : defaultViewingDistance },
+                                              set: { viewDistance = $0 }),
+                               in: 25...120)
+                        valueLabel("\(Int((viewDistance > 0 ? viewDistance : defaultViewingDistance).rounded())) cm")
+                    }
+                    .help("How far your eyes are from the screen. Closer makes its far edge's size change more "
+                          + "as the lid moves.")
+                }
+                if viewpoint == .screen {
+                    GridRow {
+                        Text("Looking down")
+                        Slider(value: $lookingDown, in: -20...45)
+                        valueLabel("\(Int(lookingDown.rounded()))°")
+                    }
+                    .help("How far above square-on you look at the screen from, at the anchored angle. Tune it if "
+                          + "closing the lid and opening it don't feel equally right.")
+                }
+            }
+            .font(.callout)
+
+            if viewpoint == .eyes {
+                eyeControls
+            } else {
+                Text("Worked out from the screen's size and the lid angle, as if the screen faced you when the "
+                     + "card was anchored. Re-center at the angle you like.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var eyeControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             Grid(horizontalSpacing: 10, verticalSpacing: 6) {
                 GridRow {

@@ -35,14 +35,21 @@ struct ContentView: View {
     @AppStorage("mode") private var mode: CardMode = .facing
     @AppStorage("eyeDistance") private var eyeDistance = 55.0
     @AppStorage("eyeHeight") private var eyeHeight = 35.0
+    @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
+    @AppStorage("viewSensitivity") private var sensitivity = 1.0
+    /// 0 means the default for the screen.
+    @AppStorage("viewDistance") private var viewDistance = 0.0
+    @AppStorage("viewLookingDown") private var lookingDown = 0.0
     /// How much of the window the card may fill, in both directions.
     @AppStorage("cardSize") private var cardFill = 0.45
     @AppStorage("imagePath") private var imagePath = ""
     /// Whether the card covers the whole window instead of following the card width setting.
     @AppStorage("fillsWindow") private var fillsWindow = false
     private var blur = StoredEffect("blur", edge: .top)
-    private var darkness = StoredEffect("darkness", edge: .bottom)
     @State private var image: CGImage?
+    /// The checkerboard as a picture, so it can go through the blur shader like a photo.
+    @State private var checkerboard: CGImage?
+    @State private var atlas: BlurAtlas?
     @State private var isChoosingImage = false
     @State private var isDropTargeted = false
     @State private var showsControls = true
@@ -60,76 +67,80 @@ struct ContentView: View {
                 PlacementReader { placement = $0 }
 
                 if let placement, sensor.isAvailable {
-                    let rig = Rig(lidAngle: sensor.angle, eyeDistance: eyeDistance, eyeHeight: eyeHeight,
-                                  placement: placement)
+                    let anchor = anchorAngle ?? sensor.angle
+                    let defaultDistance = Rig.defaultViewingDistance(for: placement)
+                    let eye = viewpoint == .screen
+                        ? Rig.screenViewpoint(anchorAngle: anchor, placement: placement,
+                                              distance: viewDistance > 0 ? viewDistance : defaultDistance,
+                                              lookingDown: lookingDown)
+                        : (distance: eyeDistance, height: eyeHeight)
+                    // Sensitivity scales how much the lid's movement since the anchor counts.
+                    let rig = Rig(lidAngle: anchor + sensitivity * (sensor.angle - anchor),
+                                  eyeDistance: eye.distance, eyeHeight: eye.height, placement: placement)
                     let cardFrame = CGRect(x: placement.frame.minX + (size.width - cardSize.width) / 2,
                                            y: placement.frame.minY + (size.height - cardSize.height) / 2,
                                            width: cardSize.width, height: cardSize.height)
 
-                    let anchor = anchorAngle ?? sensor.angle
                     let pose = rig.cardPose(frame: cardFrame, mode: mode, anchorAngle: anchor)
 
-                    // The lid slides each effect in from its edge. Full blur, in points, is up to an
-                    // eighth of the card's shorter side. A card filling the window has its own edges
-                    // pushed off-screen as the lid moves, so there the effects come in from the
-                    // window's edges instead.
-                    let blurRamp = blur.ramp(lidAngle: sensor.angle, anchorAngle: anchor)
-                    let blurRadius = blurRamp.peak > 0.002 ? blur.strength * min(cardSize.width, cardSize.height) / 8 : 0
-                    let shadeRamp = darkness.ramp(lidAngle: sensor.angle, anchorAngle: anchor)
-                    let shade = shadeRamp.peak > 0.002 ? darkness.strength : 0
-                    let effectsOnCard = !fillsWindow
-
                     // The card is drawn at its laid-out size and then warped, so render it bigger when
-                    // it's stretched to keep it sharp, within what the GPU handles comfortably. Every
-                    // blur layer needs its own copy, so there's less room with blur on.
+                    // it's stretched to keep it sharp.
                     let stretch = pose.map { max($0.boundingBox.width / cardSize.width,
                                                  $0.boundingBox.height / cardSize.height) } ?? 1
-                    let largest = (blurRadius > 0.25 ? 1800 : 2400) / max(cardSize.width, cardSize.height)
-                    let sharpness = min(min(max((stretch - 0.1).rounded(.up), 1), 4), largest)
-                    let renderFrame = cardFrame.insetBy(dx: -cardSize.width * (sharpness - 1) / 2,
-                                                        dy: -cardSize.height * (sharpness - 1) / 2)
-                    let transform = pose?.transform(from: renderFrame)
+                    let sharpness = min(min(max((stretch - 0.1).rounded(.up), 1), 4), 2400 / max(cardSize.width, cardSize.height))
+                    let rendered = { (frame: CGRect) -> CGRect in
+                        frame.insetBy(dx: -frame.width * (sharpness - 1) / 2, dy: -frame.height * (sharpness - 1) / 2)
+                    }
+                    let source = image ?? checkerboard
+
+                    Color.black
 
                     // Hidden rather than drawn uncorrected when the lid is too far closed to draw it.
-                    let card = Color.clear.overlay {
-                        ProgressiveBlur(radius: effectsOnCard ? blurRadius * sharpness : 0, ramp: blurRamp,
-                                        edge: blur.edge, isOpaque: image.map(isOpaque) ?? true) {
-                            if let image {
-                                // Filling the window crops the image to the window's shape.
-                                Image(decorative: image, scale: 1)
-                                    .resizable()
-                                    .interpolation(.high)
-                                    .aspectRatio(contentMode: fillsWindow ? .fill : .fit)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .clipped()
-                            } else {
-                                CheckerCard(lineWidth: 4 * sharpness)
+                    Color.clear.overlay {
+                        if let atlas, let pose {
+                            // The shader draws past the card on every side, so the blur can spread
+                            // beyond its edges, and that bigger area is held in space the same way.
+                            let margin = blurMargin(cardSize: cardSize, strength: blur.strength,
+                                                    shape: blur.shape(lidAngle: sensor.angle, anchorAngle: anchor,
+                                                                      pose: pose, window: nil))
+                            let area = cardFrame.insetBy(dx: -margin.width, dy: -margin.height)
+                            let renderFrame = rendered(area)
+                            if let transform = rig.cardPose(frame: area, mode: mode, anchorAngle: anchor)?
+                                .transform(from: renderFrame) {
+                                // Filling the window pushes the card's own edges off-screen as the lid
+                                // moves, so edge fades come in from the window's edges instead.
+                                let toWindow = transform.translatedAfter(x: renderFrame.minX - placement.frame.minX,
+                                                                         y: renderFrame.minY - placement.frame.minY)
+                                let shape = blur.shape(lidAngle: sensor.angle, anchorAngle: anchor, pose: pose,
+                                                       window: fillsWindow ? (toWindow, size) : nil)
+                                BlurredCard(atlas: atlas, values: blurShaderValues(
+                                    strength: blur.strength, dim: blur.dim, shape: shape, atlas: atlas,
+                                    cardSize: cardSize, margin: margin, crops: fillsWindow && image != nil))
+                                .frame(width: renderFrame.width, height: renderFrame.height)
+                                .projectionEffect(transform)
                             }
+                        } else if let source, let transform = pose?.transform(from: rendered(cardFrame)) {
+                            // Until the blur's copies are ready.
+                            Image(decorative: source, scale: 1)
+                                .resizable()
+                                .frame(width: rendered(cardFrame).width, height: rendered(cardFrame).height)
+                                .projectionEffect(transform)
                         }
-                        .overlay {
-                            if effectsOnCard, shade > 0.005 {
-                                EdgeDarkness(opacity: shade, ramp: shadeRamp, edge: darkness.edge)
-                            }
-                        }
-                        .frame(width: renderFrame.width, height: renderFrame.height)
-                        .projectionEffect(transform ?? ProjectionTransform())
-                        .opacity(transform == nil ? 0 : 1)
                     }
-
-                    if effectsOnCard {
-                        Backdrop()
-                        card
-                    } else {
-                        ProgressiveBlur(radius: blurRadius, ramp: blurRamp, edge: blur.edge, isOpaque: true) {
-                            ZStack {
-                                Backdrop()
-                                card
-                            }
-                        }
-                        .overlay {
-                            if shade > 0.005 {
-                                EdgeDarkness(opacity: shade, ramp: shadeRamp, edge: darkness.edge)
-                            }
+                    // The sharp copy only needs to be about as big as the card is drawn; a bigger one
+                    // would shimmer when shrunk. Remade only when that size changes by a fifth or so.
+                    // A photo filling the window is trimmed to the window's shape first, since the
+                    // rest never shows.
+                    .task(id: AtlasRequest(source: source, longSide: max(cardSize.width, cardSize.height) * 3,
+                                           aspect: fillsWindow && image != nil ? size.width / size.height : nil)) {
+                        guard let source else { return }
+                        // A different picture shouldn't show the last one's copies while its own are made.
+                        if atlas?.source != ObjectIdentifier(source) { atlas = nil }
+                        let request = AtlasRequest(source: source, longSide: max(cardSize.width, cardSize.height) * 3,
+                                                   aspect: fillsWindow && image != nil ? size.width / size.height : nil)
+                        if let made = await BlurAtlas.make(from: source, longSide: min(request.longSide, 3456),
+                                                           aspect: request.aspect) {
+                            atlas = made
                         }
                     }
 
@@ -141,6 +152,7 @@ struct ContentView: View {
                                 hasImage: image != nil,
                                 canCalibrate: placement.isBuiltIn,
                                 calibrator: calibrator,
+                                defaultViewingDistance: defaultDistance,
                                 status: status(rig: rig, pose: pose, placement: placement, anchor: anchor),
                                 recenter: { anchorAngle = sensor.angle },
                                 fillWindow: {
@@ -164,13 +176,13 @@ struct ContentView: View {
                                 .font(.callout)
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 7)
-                                .background(.regularMaterial, in: .capsule)
+                                .background(Color(white: 0.12).opacity(0.94), in: .capsule)
                         }
                         .padding(24)
                         .transition(.opacity)
                     }
                 } else {
-                    Backdrop()
+                    Color.black
                     if !sensor.isAvailable {
                         Text("No lid angle sensor found")
                             .font(.title2.weight(.semibold))
@@ -203,6 +215,7 @@ struct ContentView: View {
         .ignoresSafeArea()
         .onAppear {
             anchorAngle = sensor.angle
+            checkerboard = renderCheckerboard()
             if !imagePath.isEmpty, !useImage(at: URL(fileURLWithPath: imagePath)) { imagePath = "" }
         }
         .task(id: showsControls) {
@@ -235,10 +248,6 @@ struct ContentView: View {
         }
     }
 
-    private func isOpaque(_ image: CGImage) -> Bool {
-        [.none, .noneSkipFirst, .noneSkipLast].contains(image.alphaInfo)
-    }
-
     @discardableResult
     private func useImage(at url: URL) -> Bool {
         guard let loaded = loadCardImage(at: url) else { return false }
@@ -250,7 +259,7 @@ struct ContentView: View {
     private func status(rig: Rig, pose: CardPose?, placement: ScreenPlacement, anchor: Double) -> String {
         guard placement.isBuiltIn else { return "Move this window to the built-in display" }
         let fps = sensor.framesPerSecond.map { " · \($0) fps" } ?? ""
-        let lid = "Lid \(rig.lidAngle.formatted(.number.precision(.fractionLength(1))))°\(fps)"
+        let lid = "Lid \(sensor.angle.formatted(.number.precision(.fractionLength(1))))°\(fps)"
         guard mode != .flat else { return "\(lid) · no correction" }
         guard let pose else { return "\(lid) · too far closed to draw the card from your eye position" }
         let lean = rig.lean(of: pose.up)
@@ -260,6 +269,42 @@ struct ContentView: View {
         guard pose.boundingBox.intersects(placement.frame) else { return "\(lid) · card \(held), now out of view" }
         return "\(lid) · card \(held), \(tilt), drawn at \(Int((pose.scale * 100).rounded()))% size"
     }
+}
+
+/// What the blur atlas is made from, roughly how big, and what shape it's trimmed to. Sizes are
+/// grouped into steps of about a fifth, so small changes to the card don't remake it.
+struct AtlasRequest: Equatable {
+    var source: ObjectIdentifier?
+    var longSide: Double
+    var aspect: Double?
+
+    init(source: CGImage?, longSide: Double, aspect: Double?) {
+        self.source = source.map(ObjectIdentifier.init)
+        self.longSide = Self.bucket(longSide)
+        self.aspect = aspect.map { ($0 * 100).rounded() / 100 }
+    }
+
+    static func bucket(_ longSide: Double) -> Double {
+        pow(2, (log2(max(longSide, 64)) * 4).rounded() / 4)
+    }
+}
+
+extension ProjectionTransform {
+    /// This transform followed by a move of (`x`, `y`).
+    func translatedAfter(x: Double, y: Double) -> ProjectionTransform {
+        var moved = self
+        moved.m11 += m13 * x; moved.m21 += m23 * x; moved.m31 += m33 * x
+        moved.m12 += m13 * y; moved.m22 += m23 * y; moved.m32 += m33 * y
+        return moved
+    }
+}
+
+/// The checkerboard as a 3:2 picture, big enough to stay crisp on a full-screen card.
+@MainActor
+private func renderCheckerboard() -> CGImage? {
+    let renderer = ImageRenderer(content: CheckerCard(lineWidth: 10).frame(width: 2400, height: 1600))
+    renderer.scale = 1
+    return renderer.cgImage
 }
 
 /// Loads an image upright (following its orientation tag) and no bigger than the card is ever drawn.
@@ -301,32 +346,6 @@ struct CheckerCard: View {
         }
         .overlay(Rectangle().strokeBorder(.white, lineWidth: lineWidth))
     }
-}
-
-/// The window's dark background and its dot grid.
-struct Backdrop: View {
-    var body: some View {
-        ZStack {
-            Color(red: 0.055, green: 0.06, blue: 0.08)
-            DotGrid()
-        }
-    }
-}
-
-/// Faint dots that sit flat on the screen, so the card's correction reads against them. Drawn as one
-/// repeating tile, which is far cheaper than thousands of separate dots.
-struct DotGrid: View {
-    var body: some View {
-        Image(nsImage: dotTile)
-            .resizable(resizingMode: .tile)
-    }
-}
-
-/// One 28-point cell of the dot grid, with its dot in the middle.
-@MainActor private let dotTile = NSImage(size: NSSize(width: 28, height: 28), flipped: false) { rect in
-    NSColor.white.withAlphaComponent(0.14).setFill()
-    NSBezierPath(ovalIn: NSRect(x: rect.midX - 1.25, y: rect.midY - 1.25, width: 2.5, height: 2.5)).fill()
-    return true
 }
 
 extension Color {
