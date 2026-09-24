@@ -8,6 +8,8 @@ struct ScreenPlacement: Equatable {
     var displaySize: CGSize
     var cmPerPoint: Double
     var isBuiltIn: Bool
+    /// Height of the camera notch in points, or 0 on displays without one.
+    var notchHeight: CGFloat
 }
 
 /// Reports the placement of the space it fills whenever the window moves, resizes or changes display.
@@ -60,7 +62,8 @@ struct PlacementReader: NSViewRepresentable {
                               width: rect.width, height: rect.height),
                 displaySize: screen.frame.size,
                 cmPerPoint: CGDisplayScreenSize(id).width / 10 / screen.frame.width,
-                isBuiltIn: CGDisplayIsBuiltin(id) != 0)
+                isBuiltIn: CGDisplayIsBuiltin(id) != 0,
+                notchHeight: screen.safeAreaInsets.top)
             guard placement != last else { return }
             last = placement
 

@@ -7,6 +7,9 @@ enum CardMode: String, CaseIterable {
     case facing
     /// Standing vertically on the desk, like a physical card propped behind the keyboard.
     case upright
+    /// Keeping the tilt the screen had when the card was anchored, so at that angle it sits exactly
+    /// on the screen, and stays there in space as the lid moves on.
+    case asPlaced
     /// Drawn flat on the screen with no correction, for comparison.
     case flat
 
@@ -14,6 +17,7 @@ enum CardMode: String, CaseIterable {
         switch self {
         case .facing: "Facing you"
         case .upright: "Upright"
+        case .asPlaced: "As placed"
         case .flat: "Flat"
         }
     }
@@ -33,6 +37,14 @@ struct Rig {
     static let hingeToDisplay = 1.2
 
     var eye: SIMD3<Double> { [0, eyeHeight, eyeDistance] }
+
+    /// Distance from the hinge up the lid to the camera: centered in the notch, or just above the
+    /// display on Macs without one.
+    var cameraFromHinge: Double {
+        let k = placement.cmPerPoint
+        let belowTop = placement.notchHeight > 0 ? placement.notchHeight / 2 * k : -0.5
+        return Self.hingeToDisplay + placement.displaySize.height * k - belowTop
+    }
 
     private var radians: Double { lidAngle * .pi / 180 }
     /// Unit vector pointing up the screen, from the hinge toward its top edge.
@@ -62,11 +74,15 @@ struct Rig {
                        y: placement.displaySize.height - (dot(hit, screenUp) - Self.hingeToDisplay) / k)
     }
 
-    /// The card's up direction in the world. Its right direction is always along the hinge.
-    func cardUp(at center: SIMD3<Double>, mode: CardMode) -> SIMD3<Double> {
+    /// The card's up direction in the world, for a card anchored at `anchorAngle`. Its right
+    /// direction is always along the hinge.
+    func cardUp(at center: SIMD3<Double>, mode: CardMode, anchorAngle: Double) -> SIMD3<Double> {
         switch mode {
         case .flat:
             return screenUp
+        case .asPlaced:
+            let t = anchorAngle * .pi / 180
+            return [0, sin(t), cos(t)]
         case .upright:
             return [0, 1, 0]
         case .facing:
@@ -92,7 +108,7 @@ struct Rig {
     func cardPose(frame: CGRect, mode: CardMode, anchorAngle: Double) -> CardPose? {
         let frameCenter = CGPoint(x: frame.midX, y: frame.midY)
         guard mode != .flat else {
-            return pose(center: world(fromDisplay: frameCenter), size: frame.size, mode: mode, scale: 1)
+            return pose(center: world(fromDisplay: frameCenter), up: screenUp, size: frame.size, scale: 1)
         }
 
         var anchorRig = self
@@ -104,16 +120,16 @@ struct Rig {
         guard let seen = display(fromWorld: anchor) else { return nil }
         let scale = length(world(fromDisplay: seen) - eye) / length(anchor - eye)
 
-        guard let pose = pose(center: anchor, size: frame.size, mode: mode, scale: scale) else { return nil }
+        let up = cardUp(at: anchor, mode: mode, anchorAngle: anchorAngle)
+        guard let pose = pose(center: anchor, up: up, size: frame.size, scale: scale) else { return nil }
         let box = pose.boundingBox
         guard box.width <= frame.width * 8, box.height <= frame.height * 8 else { return nil }
         return pose
     }
 
     /// Traces the corners of a card centered at `center` in the world onto the display.
-    private func pose(center: SIMD3<Double>, size: CGSize, mode: CardMode, scale: Double) -> CardPose? {
+    private func pose(center: SIMD3<Double>, up direction: SIMD3<Double>, size: CGSize, scale: Double) -> CardPose? {
         let k = placement.cmPerPoint
-        let direction = cardUp(at: center, mode: mode)
         let up = direction * (size.height / 2 * k)
         let right = SIMD3<Double>(size.width / 2 * k, 0, 0)
 
