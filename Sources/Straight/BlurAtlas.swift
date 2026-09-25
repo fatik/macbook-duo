@@ -1,11 +1,16 @@
 import CoreImage
-import SwiftUI
+import Metal
+
+/// The GPU everything is drawn with.
+enum GPU {
+    static let device: MTLDevice = MTLCreateSystemDefaultDevice()!
+}
 
 /// A picture and progressively blurrier copies of it, packed into one texture so a single shader
-/// pass (`CardBlur.metal`) can pick how blurred each pixel should be. Blurring happens once, when
+/// pass (`CardScene.metal`) can pick how blurred each pixel should be. Blurring happens once, when
 /// the atlas is made; each frame only chooses between copies.
 struct BlurAtlas {
-    let image: Image
+    let texture: MTLTexture
     let pixelSize: CGSize
     /// Where each copy sits, in pixels from the atlas's top-left: the sharp picture first, then
     /// copies blurred by an eighth of the picture's shorter side times `(level / levels)²`.
@@ -23,22 +28,22 @@ struct BlurAtlas {
     /// Makes the atlas with the sharp copy no longer than `longSide` pixels, first trimming the
     /// picture's middle to `aspect` (width over height) if given, since nothing outside it is shown.
     /// The strongest blur is `blurPerWidth` of the picture's width, or an eighth of its shorter side
-    /// if not given. Runs off the main thread.
+    /// if not given. Runs off the main thread, including handing the texture to the GPU.
     static func make(from source: CGImage, longSide: Double, aspect: Double? = nil,
                      blurPerWidth: Double? = nil) async -> BlurAtlas? {
         let packed = await Task.detached(priority: .userInitiated) {
             pack(source, longSide: longSide, aspect: aspect, blurPerWidth: blurPerWidth)
         }.value
         guard let packed else { return nil }
-        return BlurAtlas(image: Image(decorative: packed.image, scale: 1),
-                         pixelSize: CGSize(width: packed.image.width, height: packed.image.height),
+        return BlurAtlas(texture: packed.texture,
+                         pixelSize: CGSize(width: packed.texture.width, height: packed.texture.height),
                          tiles: packed.tiles,
                          aspect: packed.tiles[0].width / packed.tiles[0].height,
                          source: ObjectIdentifier(source))
     }
 
     private struct Packed: @unchecked Sendable {
-        var image: CGImage
+        var texture: MTLTexture
         var tiles: [CGRect]
     }
 
@@ -85,10 +90,28 @@ struct BlurAtlas {
                                                                 y: height - tile.maxY - copy.extent.minY))
             atlas = placed.composited(over: atlas)
         }
-        guard let image = context.createCGImage(atlas, from: CGRect(x: 0, y: 0, width: width, height: height)) else {
-            return nil
-        }
-        return Packed(image: image, tiles: tiles)
+        guard let image = context.createCGImage(atlas, from: CGRect(x: 0, y: 0, width: width, height: height)),
+              let texture = upload(image)
+        else { return nil }
+        return Packed(texture: texture, tiles: tiles)
+    }
+
+    /// The picture as a texture: sRGB, with premultiplied alpha, top row first.
+    private static func upload(_ image: CGImage) -> MTLTexture? {
+        let width = image.width, height = image.height
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let bitmap = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                     space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        bitmap.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width,
+                                                                  height: height, mipmapped: false)
+        descriptor.usage = .shaderRead
+        guard let pixels = bitmap.data, let texture = GPU.device.makeTexture(descriptor: descriptor) else { return nil }
+        texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
+                        withBytes: pixels, bytesPerRow: bitmap.bytesPerRow)
+        return texture
     }
 
     private static func resize(_ image: CIImage, by scale: Double) -> CIImage {
@@ -104,138 +127,4 @@ struct BlurAtlas {
                                                width: extent.width.rounded(.down), height: extent.height.rounded(.down)))
         return trimmed.transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
     }
-}
-
-/// Black wherever the card doesn't cover, softened like its outline: drawn over a stack of layers on
-/// the black background, it shapes the whole stack at once.
-struct CardOutside: View {
-    var values: [Float]
-
-    var body: some View {
-        GeometryReader { geometry in
-            Rectangle()
-                .colorEffect(ShaderLibrary.cardOutside(.float2(geometry.size), .floatArray(values)))
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-/// The card face drawn by the blur shader.
-struct BlurredCard: View {
-    var atlas: BlurAtlas
-    var values: [Float]
-
-    var body: some View {
-        GeometryReader { geometry in
-            Rectangle()
-                .colorEffect(ShaderLibrary.cardBlur(.float2(geometry.size), .image(atlas.image), .floatArray(values)))
-        }
-    }
-}
-
-/// Where the blur (or the dimming) is for one frame.
-enum BlurShape {
-    case none
-    /// Grows with how much farther away (or nearer) than the in-focus surface each part of the card
-    /// is; `top` and `bottom` are those distances at the card's top and bottom edges.
-    case depth(top: Double, bottom: Double, full: Double, side: DepthSide)
-    /// Fades in from an edge of the card.
-    case cardEdge(EffectEdge, EffectRamp)
-    /// Fades in from an edge of the window. `toWindow` takes a point on the drawn card to the
-    /// window's coordinates.
-    case windowEdge(EffectEdge, EffectRamp, toWindow: ProjectionTransform, windowSize: CGSize)
-}
-
-/// How far past the card the view drawing it reaches, so its outline can soften and spill outward
-/// as far as the strongest blur spreads.
-func blurMargin(cardSize: CGSize, strength: Double, shape: BlurShape) -> CGSize {
-    if case .none = shape { return .zero }
-    let spill = 3 * strength * min(cardSize.width, cardSize.height) / 8 + 1
-    return CGSize(width: spill, height: spill)
-}
-
-/// Packs the blur shader's settings in the order `CardBlur.metal` reads them. `cardAspect` is the
-/// card's width over its height; a picture of a different shape is cropped to fill it, unless
-/// `pictureRect` places it somewhere on the card instead (in fractions of the card's size).
-/// `margin` is how far the view reaches past the card, from `blurMargin`. `cornerRadius` rounds the
-/// card's outline, in the view's points, and `shapesEdge` says whether this picture is shaped by it
-/// (a layer in a stack isn't; the stack is shaped once on top by `CardOutside`).
-/// `dim` darkens the picture where `dimShape` says, separately from the blur.
-func blurShaderValues(strength: Double, shape: BlurShape, dim: Double, dimShape: BlurShape, atlas: BlurAtlas,
-                      cardSize: CGSize, margin: CGSize, crops: Bool, pictureRect: CGRect? = nil,
-                      cornerRadius: Double = 0, shapesEdge: Bool = true) -> [Float] {
-    let cardAspect = cardSize.width / cardSize.height
-    var values = [Float](repeating: 0, count: 40)
-    values[0] = Float(strength)
-
-    /// Puts `shape` in the slots for its kind, edge, front, width, full depth and side. Where the
-    /// card is (its depth and where it lands in the window) is the same for both shapes.
-    func pack(_ shape: BlurShape, into slots: [Int]) {
-        func setEdge(_ edge: EffectEdge, _ ramp: EffectRamp) {
-            values[slots[1]] = Float(EffectEdge.allCases.firstIndex(of: edge) ?? 0)
-            values[slots[2]] = Float(ramp.front)
-            values[slots[3]] = Float(max(ramp.width, 0.0001))
-        }
-        switch shape {
-        case .none:
-            values[slots[0]] = 0
-        case .depth(let top, let bottom, let full, let side):
-            values[slots[0]] = 1
-            values[5] = Float(top)
-            values[6] = Float(bottom)
-            values[slots[4]] = Float(max(full, 0.0001))
-            values[slots[5]] = switch side {
-            case .nearer: -1
-            case .either: 0
-            case .farther: 1
-            }
-        case .cardEdge(let edge, let ramp):
-            values[slots[0]] = 2
-            setEdge(edge, ramp)
-        case .windowEdge(let edge, let ramp, let t, let windowSize):
-            values[slots[0]] = 3
-            setEdge(edge, ramp)
-            for (index, m) in [t.m11, t.m12, t.m13, t.m21, t.m22, t.m23, t.m31, t.m32, t.m33].enumerated() {
-                values[9 + index] = Float(m)
-            }
-            values[18] = Float(windowSize.width)
-            values[19] = Float(windowSize.height)
-        }
-    }
-    pack(shape, into: [1, 2, 3, 4, 7, 8])
-    pack(dimShape, into: [32, 33, 34, 35, 36, 37])
-
-    // Filling a card of another shape crops the picture's middle.
-    var scale = CGSize(width: 1, height: 1)
-    if crops {
-        if atlas.aspect > cardAspect {
-            scale.width = cardAspect / atlas.aspect
-        } else {
-            scale.height = atlas.aspect / cardAspect
-        }
-    }
-    if let rect = pictureRect {
-        values[20] = Float(1 / rect.width)
-        values[21] = Float(1 / rect.height)
-        values[22] = Float(-rect.minX / rect.width)
-        values[23] = Float(-rect.minY / rect.height)
-    } else {
-        values[20] = Float(scale.width)
-        values[21] = Float(scale.height)
-        values[22] = Float((1 - scale.width) / 2)
-        values[23] = Float((1 - scale.height) / 2)
-    }
-
-    values[24] = Float(BlurAtlas.levels)
-    values[25] = Float(atlas.pixelSize.width)
-    values[26] = Float(atlas.pixelSize.height)
-    values[27] = Float(dim)
-    values[28] = Float(margin.width / cardSize.width)
-    values[29] = Float(margin.height / cardSize.height)
-    values[30] = Float(cornerRadius)
-    values[31] = shapesEdge ? 1 : 0
-    for tile in atlas.tiles {
-        values += [Float(tile.minX), Float(tile.minY), Float(tile.width), Float(tile.height)]
-    }
-    return values
 }

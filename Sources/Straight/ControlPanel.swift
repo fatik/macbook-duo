@@ -1,37 +1,79 @@
 import SwiftUI
 
+/// What the card shows.
+enum PictureSource {
+    case checkerboard, desert, image
+}
+
+/// What the panel's buttons do; the window carries them out.
+struct PanelActions {
+    var recenter: () -> Void
+    var fillWindow: () -> Void
+    var chooseImage: () -> Void
+    var showCheckerboard: () -> Void
+    var showDesert: () -> Void
+    var calibrateWithCamera: () -> Void
+    var toggleEdgeToEdge: () -> Void
+    var hide: () -> Void
+    var startLineUp: () -> Void
+    var saveLineUp: () -> Void
+    var finishLineUp: () -> Void
+    var cancelLineUp: () -> Void
+}
+
 /// The floating settings panel. It edits the stored settings directly; the window reads the same ones.
+///
+/// A header that's always there shows the lid and holds the actions used most (re-center, full
+/// screen, hide). Below it, four tabs go from what's shown to how it sits in space, how it looks,
+/// and whom it's drawn for.
 struct ControlPanel: View {
+    var setup: CardScene
+    var sensor: LidSensor
     /// The card's real-world width in centimeters.
     var cardWidth: Double
-    var hasImage: Bool
+    var source: PictureSource
+    var image: CGImage?
+    var checkerboard: CGImage?
     var canCalibrate: Bool
     var calibrator: EyeCalibrator
     /// The viewing distance `Viewpoint.screen` assumes unless it's been changed, in centimeters.
     var defaultViewingDistance: Double
-    var status: String
-    var recenter: () -> Void
-    var fillWindow: () -> Void
-    var chooseImage: () -> Void
-    var clearImage: () -> Void
-    var hasScene: Bool
-    var useScene: () -> Void
-    var calibrate: () -> Void
     var isEdgeToEdge: Bool
-    var toggleEdgeToEdge: () -> Void
-    var hide: () -> Void
+    var lineUp: EyeLineUp
+    var actions: PanelActions
 
     enum Tab: String, CaseIterable {
-        case card = "Card", scene = "Scene", effects = "Effects", viewer = "Viewer"
+        case picture, placement, look, viewer
+
+        var title: String {
+            switch self {
+            case .picture: "Picture"
+            case .placement: "Placement"
+            case .look: "Look"
+            case .viewer: "Viewer"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .picture: "photo.on.rectangle.angled"
+            case .placement: "rotate.3d"
+            case .look: "camera.filters"
+            case .viewer: "eye"
+            }
+        }
     }
 
-    @AppStorage("panelTab") private var tab: Tab = .card
+    @AppStorage("panelTab") private var tab: Tab = .picture
     @AppStorage("mode") private var mode: CardMode = .facing
     @AppStorage("cardSize") private var cardFill = 0.45
     @AppStorage("fillsWindow") private var fillsWindow = false
+    @AppStorage("pinnedAtBottom") private var pinnedAtBottom = true
+    @AppStorage("backgroundColor") private var backgroundColor = 0x000000
     @AppStorage("cornerRadius") private var cornerRadius = ControlPanel.defaultCornerRadius
     @AppStorage("parallax") private var parallax = 0.6
     @AppStorage("parallaxDirection") private var parallaxDirection: LidDirection = .either
+    @AppStorage("parallaxMotion") private var parallaxMotion: ParallaxMotion = .toward
     @AppStorage("showsClock") private var showsClock = true
     @AppStorage("clockWeight") private var clockWeight = ClockStyle.phone.weight
     @AppStorage("clockWidth") private var clockWidth = ClockStyle.phone.width
@@ -40,10 +82,6 @@ struct ControlPanel: View {
     @AppStorage("clockBlend") private var clockBlend: ClockBlend = .normal
     @AppStorage("clockDepth") private var clockDepth = 0.0
     @AppStorage("clockBlur") private var clockBlur = 0.0
-
-    /// macOS doesn't say how round the screen's corners are, so this is an estimate for recent
-    /// MacBooks, in millimeters; the slider is there to match it by eye.
-    static let defaultCornerRadius = 3.0
     @AppStorage("eyeDistance") private var eyeDistance = 55.0
     @AppStorage("eyeHeight") private var eyeHeight = 35.0
     @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
@@ -53,416 +91,367 @@ struct ControlPanel: View {
     private var blur = StoredEffect.blur()
     private var dim = StoredEffect.dim()
 
-    init(cardWidth: Double, hasImage: Bool, canCalibrate: Bool, calibrator: EyeCalibrator,
-         defaultViewingDistance: Double, status: String,
-         recenter: @escaping () -> Void, fillWindow: @escaping () -> Void,
-         chooseImage: @escaping () -> Void, clearImage: @escaping () -> Void,
-         hasScene: Bool, useScene: @escaping () -> Void,
-         calibrate: @escaping () -> Void, isEdgeToEdge: Bool, toggleEdgeToEdge: @escaping () -> Void,
-         hide: @escaping () -> Void) {
+    @State private var showsClockMotion = false
+    @State private var showsMoreBlur = false
+    @State private var showsMoreDim = false
+
+    /// macOS doesn't say how round the screen's corners are, so this is an estimate for recent
+    /// MacBooks, in millimeters; the slider is there to match it by eye.
+    static let defaultCornerRadius = 3.0
+    static let width: CGFloat = 372
+
+    init(setup: CardScene, sensor: LidSensor, cardWidth: Double, source: PictureSource, image: CGImage?,
+         checkerboard: CGImage?, canCalibrate: Bool, calibrator: EyeCalibrator, defaultViewingDistance: Double,
+         isEdgeToEdge: Bool, lineUp: EyeLineUp, actions: PanelActions) {
+        self.setup = setup
+        self.sensor = sensor
         self.cardWidth = cardWidth
-        self.hasImage = hasImage
+        self.source = source
+        self.image = image
+        self.checkerboard = checkerboard
         self.canCalibrate = canCalibrate
         self.calibrator = calibrator
         self.defaultViewingDistance = defaultViewingDistance
-        self.status = status
-        self.recenter = recenter
-        self.fillWindow = fillWindow
-        self.chooseImage = chooseImage
-        self.clearImage = clearImage
-        self.hasScene = hasScene
-        self.useScene = useScene
-        self.calibrate = calibrate
         self.isEdgeToEdge = isEdgeToEdge
-        self.toggleEdgeToEdge = toggleEdgeToEdge
-        self.hide = hide
+        self.lineUp = lineUp
+        self.actions = actions
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Picker("Section", selection: $tab) {
-                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            header
+            TabBar(selection: $tab)
+            Group {
+                switch tab {
+                case .picture: pictureTab
+                case .placement: placementTab
+                case .look: lookTab
+                case .viewer: viewerTab
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-
-                Spacer()
-
-                Button(action: toggleEdgeToEdge) {
-                    Image(systemName: isEdgeToEdge
-                          ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 24, height: 24)
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.borderless)
-                .help(isEdgeToEdge ? "Leave full screen (F or Esc)" : "Full screen, edge to edge (F)")
-                .accessibilityLabel(isEdgeToEdge ? "Leave full screen" : "Full screen")
-
-                Button(action: hide) {
-                    Image(systemName: "xmark")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 24, height: 24)
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.borderless)
-                .help("Hide controls (X)")
-                .accessibilityLabel("Hide controls")
             }
-
-            switch tab {
-            case .card: cardControls
-            case .scene: sceneControls
-            case .effects: effectControls
-            case .viewer: viewerControls
-            }
-
-            // Always two lines tall, so the panel doesn't jump as the text wraps.
-            Text(status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .lineLimit(2, reservesSpace: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .font(.system(size: 12.5))
         .padding(14)
-        .frame(width: 440)
-        // Solid rather than frosted glass: frosting would re-blur the moving card behind it every frame.
-        .background(Color(white: 0.12).opacity(0.94), in: .rect(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.08)))
+        .frame(width: Self.width)
+        // Solid rather than frosted glass, and edged rather than shadowed: the window server would redo
+        // either every frame over the moving card, and a shadow alone costs more than the card.
+        .background(Color(white: 0.105).opacity(0.97), in: .rect(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.white.opacity(0.1)))
+        .padding(1)
+        .background(Color.black.opacity(0.35), in: .rect(cornerRadius: 19))
+        .environment(\.colorScheme, .dark)
     }
 
-    private var cardControls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Picker("Card", selection: $mode) {
-                    ForEach(CardMode.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+    // MARK: Header
 
-                Button("Re-center", action: recenter)
-                    .disabled(mode == .flat)
-            }
-
-            Grid(horizontalSpacing: 10, verticalSpacing: 6) {
-                GridRow {
-                    Text("Card width").gridColumnAlignment(.leading)
-                    // Dragging the width takes the card back out of filling the window.
-                    Slider(value: Binding(get: { cardFill }, set: { cardFill = $0; fillsWindow = false }),
-                           in: 0.1...2.5)
-                    valueLabel("\(cardWidth.formatted(.number.precision(.fractionLength(1)))) cm")
-                }
-                GridRow {
-                    Text("Corners")
-                    Slider(value: $cornerRadius, in: 0...10)
-                    valueLabel("\(cornerRadius.formatted(.number.precision(.fractionLength(1)))) mm")
-                }
-                .help("Rounds the card's corners. To match your screen's own: Fill Window at your usual angle, "
-                      + "then adjust until the card's top corners sit exactly in the screen's rounded corners.")
-            }
-            .font(.callout)
-
-            Button("Fill Window", action: fillWindow)
-                .help("Stretch the card over the whole window, held in place from the current lid angle.")
-
-            HStack {
-                Button(hasImage ? "Change Image…" : "Choose Image…", action: chooseImage)
-                    .help("Or drop an image on the window.")
-                Button("Desert Scene", action: useScene)
-                    .disabled(hasScene)
-                    .help("A layered picture: sand, mountains and sky come toward you at different speeds as "
-                          + "the lid moves, while the clock stays put.")
-                if hasImage || hasScene {
-                    Button("Checkerboard", action: clearImage)
-                }
-            }
+    private var header: some View {
+        LiveReadout(scene: setup, sensor: sensor) {
+            PillButton(symbol: "scope", title: "Re-center", help: "Hold the card where the screen is now (R)",
+                       action: actions.recenter)
+                .disabled(mode == .flat || lineUp.isActive)
+            RoundButton(symbol: isEdgeToEdge ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                        help: isEdgeToEdge ? "Leave full screen (F or Esc)" : "Full screen, edge to edge (F)",
+                        action: actions.toggleEdgeToEdge)
+            RoundButton(symbol: "xmark", help: "Hide the controls (X)", action: actions.hide)
         }
+        .padding(.horizontal, 2)
     }
 
-    private var sceneControls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if !hasScene {
-                HStack {
-                    Button("Desert Scene", action: useScene)
-                    Text("A layered picture whose layers come toward you as the lid moves.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+    // MARK: Picture
+
+    private var pictureTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            PanelSection("Show") {
+                HStack(spacing: 10) {
+                    PictureTile(title: "Checkerboard", thumbnail: checkerboard.flatMap(Thumbnails.of),
+                                isSelected: source == .checkerboard, action: actions.showCheckerboard)
+                        .help("A checkerboard with a circle: when the illusion works, the squares look square.")
+                    PictureTile(title: "Desert", thumbnail: Thumbnails.desert, isSelected: source == .desert,
+                                action: actions.showDesert)
+                        .help("A layered scene with a lock-screen clock: its layers move at different speeds as the "
+                              + "lid moves.")
+                    PictureTile(title: image == nil ? "Your Image" : "Change…",
+                                thumbnail: image.flatMap(Thumbnails.of), placeholder: "plus",
+                                isSelected: source == .image, action: actions.chooseImage)
+                        .help("Choose a picture, or drop one on the window.")
                 }
-            } else {
-                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
-                    GridRow {
-                        Text("Parallax")
-                        Slider(value: $parallax)
-                        valueLabel(percent(parallax))
-                    }
-                    .help("How strongly the layers come toward you as the lid moves: the sand most, the "
-                          + "mountains less, the sky barely.")
-                    GridRow {
-                        Text("Comes closer")
-                        Picker("Comes closer", selection: $parallaxDirection) {
-                            ForEach(LidDirection.allCases, id: \.self) { Text($0.label).tag($0) }
+                .padding(10)
+            }
+
+            if source == .desert {
+                PanelSection("Parallax") {
+                    SliderRow("Strength", value: $parallax, shown: percent(parallax),
+                              help: "How strongly the layers move as the lid moves: the sand most, the mountains "
+                                  + "less, the sky barely.")
+                    RowDivider()
+                    PanelRow("Direction") {
+                        Picker("Direction", selection: $parallaxMotion) {
+                            ForEach(ParallaxMotion.allCases, id: \.self) { Text($0.shortLabel).tag($0) }
                         }
-                        .pickerStyle(.menu)
+                        .pickerStyle(.segmented)
                         .labelsHidden()
                         .fixedSize()
-                        .gridCellColumns(2)
                     }
+                    .help("Toward you: the layers come closer as the lid moves. Away from you: they start as close "
+                          + "as they come at the anchored angle and move back to the picture as it is.")
+                    RowDivider()
+                    MenuRow("Moves when", selection: $parallaxDirection, options: LidDirection.allCases, label: \.label)
+                        .help("Which lid movement moves the layers. They move fully once the lid has moved 45°.")
+                }
 
-                    Divider().padding(.vertical, 4)
-
-                    GridRow {
-                        Text("Clock").font(.headline)
-                        Toggle("Show the date and time", isOn: $showsClock)
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                            .labelsHidden()
-                            .gridCellColumns(2)
-                            .gridCellAnchor(.trailing)
-                    }
+                PanelSection("Clock", accessory: {
+                    Toggle("Show the date and time", isOn: $showsClock)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                }) {
                     if showsClock {
-                        GridRow {
-                            Text("Width")
-                            Slider(value: $clockWidth, in: 30...150)
-                            valueLabel("\(Int(clockWidth.rounded()))")
+                        SliderRow("Width", value: $clockWidth, in: 30...150, shown: "\(Int(clockWidth.rounded()))",
+                                  help: "SF Pro's width axis: 30 is very compressed, 100 normal, 150 very expanded.")
+                        RowDivider()
+                        SliderRow("Weight", value: $clockWeight, in: 100...900, shown: "\(Int(clockWeight.rounded()))",
+                                  help: "SF Pro's weight axis: 100 is thin, 400 regular, 900 heavy.")
+                        RowDivider()
+                        SliderRow("Height", value: $clockStretch, in: 1...2.2,
+                                  shown: clockStretch.formatted(.number.precision(.fractionLength(1))) + "×",
+                                  help: "Stretches the numerals taller, like a lock screen's clock.")
+                        RowDivider()
+                        SliderRow("Opacity", value: $clockOpacity, shown: percent(clockOpacity))
+                        RowDivider()
+                        MenuRow("Blend", selection: $clockBlend, options: ClockBlend.allCases, label: \.label)
+                            .help("How the clock mixes with the picture behind it. Plus Lighter and Screen let the "
+                                  + "sky's color show through, like frosted glass.")
+                        RowDivider()
+                        DisclosureRow("Motion", isExpanded: $showsClockMotion)
+                        if showsClockMotion {
+                            RowDivider()
+                            SliderRow("Depth", value: $clockDepth, shown: clockDepth < 0.005 ? "Fixed" : percent(clockDepth),
+                                      help: "Whether the clock moves with the parallax like a layer. At 0 it stays put; "
+                                          + "the sky moves like 12% and the mountains like 50%.")
+                            RowDivider()
+                            SliderRow("Blur", value: $clockBlur, shown: clockBlur < 0.005 ? "Sharp" : percent(clockBlur),
+                                      help: "How much the clock blurs where the scene does. At 0 it stays sharp and "
+                                          + "only dims.")
                         }
-                        .help("SF Pro's width axis: 30 is very compressed, 100 normal, 150 very expanded.")
-                        GridRow {
-                            Text("Weight")
-                            Slider(value: $clockWeight, in: 100...900)
-                            valueLabel("\(Int(clockWeight.rounded()))")
-                        }
-                        .help("SF Pro's weight axis: 100 is thin, 400 regular, 900 heavy.")
-                        GridRow {
-                            Text("Height")
-                            Slider(value: $clockStretch, in: 1...2.2)
-                            valueLabel("\(clockStretch.formatted(.number.precision(.fractionLength(1))))×")
-                        }
-                        .help("Stretches the numerals taller, like a lock screen's clock.")
-                        GridRow {
-                            Text("Opacity")
-                            Slider(value: $clockOpacity)
-                            valueLabel(percent(clockOpacity))
-                        }
-                        GridRow {
-                            Text("Blend")
-                            Picker("Blend", selection: $clockBlend) {
-                                ForEach(ClockBlend.allCases, id: \.self) { Text($0.label).tag($0) }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                            .fixedSize()
-                            .gridCellColumns(2)
-                        }
-                        .help("How the clock mixes with the picture behind it. Plus Lighter and Screen let the "
-                              + "sky's color show through, like frosted glass.")
-                        GridRow {
-                            Text("Depth")
-                            Slider(value: $clockDepth)
-                            valueLabel(clockDepth < 0.005 ? "Fixed" : percent(clockDepth))
-                        }
-                        .help("Whether the clock comes toward you with the parallax like a layer, when the lid "
-                              + "moves the way Comes closer says. At 0 it stays put; the sky moves like 12% and "
-                              + "the mountains like 50%.")
-                        GridRow {
-                            Text("Blur")
-                            Slider(value: $clockBlur)
-                            valueLabel(clockBlur < 0.005 ? "Sharp" : percent(clockBlur))
-                        }
-                        .help("How much the clock blurs where the scene does, following the same depth. At 0 it "
-                              + "stays sharp and only dims.")
+                    } else {
+                        Text("The date and time sit between the sky and the mountains, like a phone's lock screen.")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
                     }
                 }
-                .font(.callout)
             }
         }
     }
 
-    private var effectControls: some View {
-        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
-            effectRows("Blur", blur, verb: "Blurs")
-            Divider().gridCellUnsizedAxes(.horizontal).padding(.vertical, 4)
-            effectRows("Dim", dim, verb: "Dims")
-        }
-        .font(.callout)
-    }
+    // MARK: Placement
 
-    @ViewBuilder
-    private func effectRows(_ title: String, _ effect: StoredEffect, verb: String) -> some View {
-        GridRow {
-            Text(title).font(.headline)
-            Picker("Based on", selection: effect.$edge) {
-                ForEach(EffectEdge.allCases, id: \.self) { Text($0.label).tag($0) }
+    private var placementTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            PanelSection("Hold the card") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("Mode", selection: $mode) {
+                        ForEach(CardMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text(mode.explanation)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(12)
+                if mode != .flat {
+                    RowDivider()
+                    PanelRow(setup.anchorAngle.map { "Anchored at \(Int($0.rounded()))°" } ?? "Anchored") {
+                        Button("Re-center", action: actions.recenter)
+                            .controlSize(.small)
+                            .disabled(lineUp.isActive)
+                    }
+                    .help("Hold the card where the screen is now (R). Everything moves from there as the lid moves.")
+                }
             }
-            .pickerStyle(.menu)
-            .fixedSize()
-            .gridCellColumns(2)
-            .gridCellAnchor(.trailing)
-        }
-        GridRow {
-            Text("Strength")
-            Slider(value: effect.$strength)
-            valueLabel(percent(effect.strength))
-        }
-        .help(verb == "Dims" ? "How dark it gets where it's full. At 100% it goes black."
-                             : "How blurred it gets where it's full.")
 
-        if effect.edge == .depth {
-            // Depth already moves with the lid, so there's no lid reaction to set.
-            GridRow {
-                Text("Full at")
-                Slider(value: effect.$spread, in: 0.05...1)
-                valueLabel("\(Int(effect.fullDepth.rounded())) cm")
-            }
-            .help("How much farther away (or nearer) than the screen a part has to be to get the full effect. "
-                  + "What's in focus is left alone.")
-            GridRow {
-                Text(verb)
-                Picker(verb, selection: effect.$depthSide) {
-                    ForEach(DepthSide.allCases, id: \.self) { Text($0.label).tag($0) }
+            PanelSection("Size") {
+                PanelRow("Fill the window") {
+                    Toggle("Fill the window", isOn: Binding(get: { fillsWindow },
+                                                            set: { $0 ? actions.fillWindow() : (fillsWindow = false) }))
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .fixedSize()
-                .gridCellColumns(2)
-            }
-        } else {
-            GridRow {
-                Text("Reach")
-                Slider(value: effect.$spread, in: 0.05...StoredEffect.longestReach)
-                valueLabel(percent(effect.spread))
-            }
-            .help("How far in from the edge it goes, at most. It eases out toward its end, so past 100% it "
-                  + "carries on across the far side instead of fading out before it.")
-            GridRow {
-                Text("Lid reaction")
-                Slider(value: effect.$lidReaction)
-                valueLabel(percent(effect.lidReaction))
-            }
-            .help("How much the lid slides the effect in. At 0% it stays put. At 100% there's none at the anchored "
-                  + "angle, and it slides in from the edge as the lid moves, all the way after "
-                  + "\(Int(StoredEffect.fullReachAfter))°.")
-            GridRow {
-                Text("Grows when")
-                Picker("Grows when", selection: effect.$lidDirection) {
-                    ForEach(LidDirection.allCases, id: \.self) { Text($0.label).tag($0) }
+                .help("Stretch the card over the whole window, held in place from the current lid angle.")
+                RowDivider()
+                // Dragging the width takes the card back out of filling the window.
+                SliderRow("Width", value: Binding(get: { cardFill }, set: { cardFill = $0; fillsWindow = false }),
+                          in: 0.1...2.5, shown: cardWidth.formatted(.number.precision(.fractionLength(1))) + " cm")
+                RowDivider()
+                PanelRow("Stand on the bottom edge") {
+                    Toggle("Stand on the bottom edge", isOn: $pinnedAtBottom)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .fixedSize()
-                .gridCellColumns(2)
-                .disabled(effect.lidReaction == 0)
+                .disabled(mode == .flat)
+                .help("Keeps the card's bottom edge on the screen's as the lid moves, leaning from there, so nothing "
+                      + "shows below it. Off, the whole card stays where it was in space.")
             }
         }
     }
 
-    private var viewerControls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Picker("Viewpoint", selection: $viewpoint) {
-                    ForEach(Viewpoint.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+    // MARK: Look
 
+    private var lookTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            effectSection("Blur", blur, verb: "Blurs", isExpanded: $showsMoreBlur)
+            effectSection("Dim", dim, verb: "Dims", isExpanded: $showsMoreDim)
+            PanelSection("Frame") {
+                SliderRow("Corners", value: $cornerRadius, in: 0...10,
+                          shown: cornerRadius.formatted(.number.precision(.fractionLength(1))) + " mm",
+                          help: "Rounds the card's top corners; the bottom ones stay square, like a MacBook's screen. "
+                              + "To match your screen's own, fill the window at your usual angle and adjust until the "
+                              + "card's top corners sit exactly in the screen's.")
+                RowDivider()
+                PanelRow("Background") {
+                    HStack(spacing: 8) {
+                        if backgroundColor != 0x000000 {
+                            Button("Black") { backgroundColor = 0x000000 }
+                                .buttonStyle(.borderless)
+                                .font(.system(size: 11.5))
+                        }
+                        ColorPicker("Background",
+                                    selection: Binding(get: { RGBColor(hex: backgroundColor).color },
+                                                       set: { backgroundColor = RGBColor($0).hex }),
+                                    supportsOpacity: false)
+                            .labelsHidden()
+                    }
+                }
+                .help("The color around the card, which shows as the lid moves it away from the window's edges, "
+                      + "and through any clear parts of a picture.")
+            }
+        }
+    }
+
+    private func effectSection(_ title: String, _ effect: StoredEffect, verb: String,
+                               isExpanded: Binding<Bool>) -> some View {
+        PanelSection(title) {
+            SliderRow("Strength", value: effect.$strength, shown: effect.strength < 0.005 ? "Off" : percent(effect.strength),
+                      help: verb == "Dims" ? "How dark it gets where it's full. At 100% it goes black."
+                                           : "How blurred it gets where it's full.")
+            RowDivider()
+            MenuRow("Follows", selection: effect.$edge, options: EffectEdge.allCases, label: \.label)
+                .help("Depth follows how far each part of the card is from the screen, like a lens focused on it. "
+                      + "An edge fades it in from that edge.")
+            RowDivider()
+            if effect.edge == .depth {
+                SliderRow("Full at", value: effect.$spread, in: 0.05...1, shown: "\(Int(effect.fullDepth.rounded())) cm",
+                          help: "How much farther away (or nearer) than the screen a part has to be for the full "
+                              + "effect. What's in focus is left alone.")
+            } else {
+                SliderRow("Reach", value: effect.$spread, in: 0.05...StoredEffect.longestReach, shown: percent(effect.spread),
+                          help: "How far in from the edge it goes. It eases out toward its end, so past 100% it "
+                              + "carries on across the far side.")
+            }
+            RowDivider()
+            DisclosureRow("More", isExpanded: isExpanded)
+            if isExpanded.wrappedValue {
+                RowDivider()
+                if effect.edge == .depth {
+                    MenuRow("\(verb)", selection: effect.$depthSide, options: DepthSide.allCases, label: \.label)
+                        .help("Which parts it applies to: those farther away than the screen, nearer, or both.")
+                } else {
+                    SliderRow("Lid reaction", value: effect.$lidReaction, shown: percent(effect.lidReaction),
+                              help: "How much the lid slides it in. At 0% it stays put. At 100% there's none at the "
+                                  + "anchored angle, and it slides in as the lid moves, fully after "
+                                  + "\(Int(StoredEffect.fullReachAfter))°.")
+                    RowDivider()
+                    MenuRow("Grows when", selection: effect.$lidDirection, options: LidDirection.allCases, label: \.label)
+                        .disabled(effect.lidReaction == 0)
+                }
+            }
+        }
+    }
+
+    // MARK: Viewer
+
+    private var viewerTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            PanelSection("Drawn for", accessory: {
                 Button("Reset") {
                     sensitivity = 1
                     viewDistance = 0
                     lookingDown = 0
                 }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
                 .disabled(sensitivity == 1 && viewDistance == 0 && lookingDown == 0)
-            }
-
-            Grid(horizontalSpacing: 10, verticalSpacing: 6) {
-                GridRow {
-                    Text("Sensitivity").gridColumnAlignment(.leading)
-                    Slider(value: $sensitivity, in: 0.25...2)
-                    valueLabel(percent(sensitivity))
+                .help("Back to 100% sensitivity and, from the screen, the usual distance and angle.")
+            }) {
+                Picker("Viewpoint", selection: $viewpoint) {
+                    ForEach(Viewpoint.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
-                .help("How much the lid's movement counts. Raise it if the picture doesn't move enough to stay "
-                      + "put as you tilt the lid, lower it if it moves too much.")
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .frame(maxWidth: .infinity)
+                .padding(12)
+                RowDivider()
                 if viewpoint == .screen {
-                    GridRow {
-                        Text("Distance")
-                        Slider(value: Binding(get: { viewDistance > 0 ? viewDistance : defaultViewingDistance },
-                                              set: { viewDistance = $0 }),
-                               in: 25...120)
-                        valueLabel("\(Int((viewDistance > 0 ? viewDistance : defaultViewingDistance).rounded())) cm")
-                    }
-                    .help("How far your eyes are from the screen. Closer makes its far edge's size change more "
-                          + "as the lid moves.")
-                }
-                if viewpoint == .screen {
-                    GridRow {
-                        Text("Looking down")
-                        Slider(value: $lookingDown, in: -20...45)
-                        valueLabel("\(Int(lookingDown.rounded()))°")
-                    }
-                    .help("How far above square-on you look at the screen from, at the anchored angle. Tune it if "
-                          + "closing the lid and opening it don't feel equally right.")
-                }
-            }
-            .font(.callout)
-
-            if viewpoint == .eyes {
-                eyeControls
-            } else {
-                Text("Worked out from the screen's size and the lid angle, as if the screen faced you when the "
-                     + "card was anchored. Re-center at the angle you like.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private var eyeControls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Grid(horizontalSpacing: 10, verticalSpacing: 6) {
-                GridRow {
-                    Text("Eye distance").gridColumnAlignment(.leading)
-                    Slider(value: $eyeDistance, in: EyeCalibrator.distanceRange)
-                    valueLabel("\(Int(eyeDistance.rounded())) cm")
-                }
-                GridRow {
-                    Text("Eye height")
-                    Slider(value: $eyeHeight, in: EyeCalibrator.heightRange)
-                    valueLabel("\(Int(eyeHeight.rounded())) cm")
-                }
-            }
-            .font(.callout)
-
-            HStack(alignment: .firstTextBaseline) {
-                if calibrator.isMeasuring {
-                    Button("Cancel", action: calibrator.cancel)
+                    SliderRow("Distance", value: Binding(get: { viewDistance > 0 ? viewDistance : defaultViewingDistance },
+                                                         set: { viewDistance = $0 }),
+                              in: 25...120,
+                              shown: "\(Int((viewDistance > 0 ? viewDistance : defaultViewingDistance).rounded())) cm",
+                              help: "How far your eyes are from the screen. Closer makes its far edge's size change "
+                                  + "more as the lid moves.")
+                    RowDivider()
+                    SliderRow("Looking down", value: $lookingDown, in: -20...45, shown: "\(Int(lookingDown.rounded()))°",
+                              help: "How far above square-on you look at the screen from, at the anchored angle.")
                 } else {
-                    Button("Calibrate with Camera", action: calibrate)
-                        .disabled(!canCalibrate)
+                    SliderRow("Eye distance", value: $eyeDistance, in: EyeCalibrator.distanceRange,
+                              shown: "\(Int(eyeDistance.rounded())) cm",
+                              help: "How far in front of the hinge your eyes are.")
+                    RowDivider()
+                    SliderRow("Eye height", value: $eyeHeight, in: EyeCalibrator.heightRange,
+                              shown: "\(Int(eyeHeight.rounded())) cm",
+                              help: "How far above the hinge your eyes are.")
                 }
-                Text(calibrationMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                RowDivider()
+                SliderRow("Sensitivity", value: $sensitivity, in: 0.25...2, shown: percent(sensitivity),
+                          help: "How much the lid's movement counts. Raise it if the picture doesn't move enough to "
+                              + "stay put, lower it if it moves too much.")
             }
 
-            if case .measuring(let progress, _) = calibrator.phase {
-                ProgressView(value: progress)
+            PanelSection("Calibrate") {
+                CalibrationRow(symbol: "hand.draw", title: "Line Up by Eye",
+                               detail: lineUp.fit.map(\.summary)
+                                   ?? "Straighten the card by eye at a few lid angles; the viewpoint that fits "
+                                      + "them all is used.",
+                               button: "Start", action: actions.startLineUp)
+                    .disabled(mode == .flat)
+                RowDivider()
+                CalibrationRow(symbol: "camera", title: "Use the Camera", detail: cameraMessage,
+                               button: calibrator.isMeasuring ? "Stop" : "Start",
+                               action: calibrator.isMeasuring ? calibrator.cancel : actions.calibrateWithCamera)
+                    .disabled(!canCalibrate && !calibrator.isMeasuring)
+                if case .measuring(let progress, _) = calibrator.phase {
+                    ProgressView(value: progress)
+                        .controlSize(.small)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
+                }
             }
         }
     }
 
-    private var calibrationMessage: String {
+    private var cameraMessage: String {
         switch calibrator.phase {
         case .idle:
-            canCalibrate
-                ? "Measures where your eyes are while you tilt the screen."
-                : "Move this window to the built-in display to calibrate."
+            canCalibrate ? "Watches your eyes while you tilt the screen." : "Needs the built-in display."
         case .measuring(_, let seesFace):
-            seesFace
-                ? "Keep your head still and slowly tilt the screen back and forth."
-                : "Looking for your face…"
+            seesFace ? "Keep your head still and slowly tilt the screen back and forth." : "Looking for your face…"
         case .finished(let distance, let height):
             "Your eyes are \(Int(distance.rounded())) cm in front of the hinge and \(Int(height.rounded())) cm above it."
         case .failed(let message):
@@ -470,14 +459,525 @@ struct ControlPanel: View {
         }
     }
 
-    private func valueLabel(_ text: String) -> some View {
-        Text(text)
-            .monospacedDigit()
-            .frame(minWidth: 52, alignment: .trailing)
-            .gridColumnAlignment(.trailing)
-    }
-
     private func percent(_ value: Double) -> String {
         "\(Int((value * 100).rounded()))%"
+    }
+}
+
+extension CardMode {
+    /// One line on what the mode does.
+    var explanation: String {
+        switch self {
+        case .facing: "Turns to face you as the lid moves, so it always looks square-on."
+        case .upright: "Stands straight up, like a card propped behind the keyboard."
+        case .asPlaced: "Keeps the tilt the screen had when you re-centered, so it looks fixed in space."
+        case .flat: "No correction: flat on the screen, for comparison."
+        }
+    }
+}
+
+extension ParallaxMotion {
+    var shortLabel: String {
+        switch self {
+        case .toward: "Toward you"
+        case .away: "Away"
+        }
+    }
+}
+
+// MARK: - Building blocks
+
+/// A titled group of rows on a slightly lighter card.
+struct PanelSection<Content: View, Accessory: View>: View {
+    var title: String
+    var accessory: Accessory
+    @ViewBuilder var content: Content
+
+    init(_ title: String, @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.accessory = accessory()
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title.uppercased())
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .kerning(0.6)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                accessory
+            }
+            .padding(.horizontal, 4)
+            VStack(alignment: .leading, spacing: 0) {
+                content
+            }
+            .background(Color.white.opacity(0.045), in: .rect(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.05)))
+        }
+    }
+}
+
+extension PanelSection where Accessory == EmptyView {
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.init(title, accessory: { EmptyView() }, content: content)
+    }
+}
+
+/// A label on the left and a control on the right.
+struct PanelRow<Control: View>: View {
+    var title: String
+    @ViewBuilder var control: Control
+
+    init(_ title: String, @ViewBuilder control: () -> Control) {
+        self.title = title
+        self.control = control()
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+            Spacer(minLength: 8)
+            control
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 34)
+    }
+}
+
+/// A labeled slider with its value on the right.
+struct SliderRow: View {
+    var title: String
+    @Binding var value: Double
+    var range: ClosedRange<Double>
+    var shown: String
+    var help: String?
+
+    init(_ title: String, value: Binding<Double>, in range: ClosedRange<Double> = 0...1, shown: String,
+         help: String? = nil) {
+        self.title = title
+        _value = value
+        self.range = range
+        self.shown = shown
+        self.help = help
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .frame(width: 92, alignment: .leading)
+            Slider(value: $value, in: range)
+                .controlSize(.small)
+            Text(shown)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 50, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 34)
+        .help(help ?? title)
+    }
+}
+
+/// A label with a pop-up menu of choices on the right.
+struct MenuRow<Option: Hashable>: View {
+    var title: String
+    @Binding var selection: Option
+    var options: [Option]
+    var label: (Option) -> String
+
+    init(_ title: String, selection: Binding<Option>, options: [Option], label: @escaping (Option) -> String) {
+        self.title = title
+        _selection = selection
+        self.options = options
+        self.label = label
+    }
+
+    var body: some View {
+        PanelRow(title) {
+            Picker(title, selection: $selection) {
+                ForEach(options, id: \.self) { Text(label($0)).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .controlSize(.small)
+            .fixedSize()
+        }
+    }
+}
+
+/// A row that shows or hides the rows after it.
+struct DisclosureRow: View {
+    var title: String
+    @Binding var isExpanded: Bool
+
+    init(_ title: String, isExpanded: Binding<Bool>) {
+        self.title = title
+        _isExpanded = isExpanded
+    }
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+        } label: {
+            HStack {
+                Text(title)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 30)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// A hairline between rows.
+struct RowDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.06))
+            .frame(height: 1)
+            .padding(.leading, 12)
+    }
+}
+
+/// A way to calibrate: what it is and a button to start it.
+struct CalibrationRow: View {
+    var symbol: String
+    var title: String
+    var detail: String
+    var button: String
+    var action: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22, height: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .medium))
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 6)
+            Button(button, action: action)
+                .controlSize(.small)
+        }
+        .padding(12)
+    }
+}
+
+/// A picture the card can show, as a small tile.
+struct PictureTile: View {
+    var title: String
+    var thumbnail: CGImage?
+    var placeholder = "photo"
+    var isSelected: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                ZStack {
+                    Color.white.opacity(0.06)
+                    if let thumbnail {
+                        Image(decorative: thumbnail, scale: 2)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Image(systemName: placeholder)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(height: 64)
+                .frame(maxWidth: .infinity)
+                .clipShape(.rect(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(isSelected ? Color.accentColor : .white.opacity(0.1), lineWidth: isSelected ? 2 : 1))
+                Text(title)
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+                    .lineLimit(1)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+/// The panel's tabs, as icons with labels.
+struct TabBar: View {
+    @Binding var selection: ControlPanel.Tab
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(ControlPanel.Tab.allCases, id: \.self) { tab in
+                Button {
+                    selection = tab
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: tab.symbol)
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(height: 17)
+                        Text(tab.title)
+                            .font(.system(size: 10.5, weight: .medium))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .foregroundStyle(selection == tab ? Color.accentColor : .secondary)
+                    .background(selection == tab ? Color.white.opacity(0.09) : .clear, in: .rect(cornerRadius: 9))
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selection == tab ? .isSelected : [])
+            }
+        }
+        .padding(3)
+        .background(Color.white.opacity(0.04), in: .rect(cornerRadius: 12))
+    }
+}
+
+/// An icon and a label in a capsule, for the header's main action.
+struct PillButton: View {
+    var symbol: String
+    var title: String
+    var help: String
+    var action: () -> Void
+    @State private var isHovered = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .padding(.horizontal, 11)
+            .frame(height: 28)
+            .background(Color.white.opacity(isHovered && isEnabled ? 0.15 : 0.07), in: .capsule)
+            .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isEnabled ? .primary : .tertiary)
+        .onHover { isHovered = $0 }
+        .help(help)
+    }
+}
+
+/// A small round icon button, for the header.
+struct RoundButton: View {
+    var symbol: String
+    var help: String
+    var action: () -> Void
+    @State private var isHovered = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .background(Color.white.opacity(isHovered && isEnabled ? 0.15 : 0.07), in: .circle)
+                .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isEnabled ? .primary : .tertiary)
+        .onHover { isHovered = $0 }
+        .help(help)
+        .accessibilityLabel(help)
+    }
+}
+
+/// How far through a few steps something is.
+struct StepDots: View {
+    var done: Int
+    var total: Int
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<total, id: \.self) { step in
+                Capsule()
+                    .fill(step < done ? Color.accentColor : Color.white.opacity(0.18))
+                    .frame(width: step == done - 1 ? 16 : 6, height: 6)
+            }
+        }
+        .accessibilityLabel("Step \(done) of \(total)")
+    }
+}
+
+/// Small pictures of what the card can show, made once each.
+@MainActor
+enum Thumbnails {
+    /// Twice the size a tile draws them, for the Retina display.
+    private static let size = CGSize(width: 212, height: 128)
+    private static var made: [(source: CGImage, thumbnail: CGImage)] = []
+
+    /// `image` shrunk to fill a tile.
+    static func of(_ image: CGImage) -> CGImage? {
+        if let known = made.first(where: { $0.source === image }) { return known.thumbnail }
+        let scale = max(size.width / Double(image.width), size.height / Double(image.height))
+        let drawn = CGSize(width: Double(image.width) * scale, height: Double(image.height) * scale)
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: (size.width - drawn.width) / 2, y: (size.height - drawn.height) / 2,
+                                       width: drawn.width, height: drawn.height))
+        guard let thumbnail = context.makeImage() else { return nil }
+        // Keeping the source keeps its identity from being reused by another picture.
+        made = Array((made + [(image, thumbnail)]).suffix(3))
+        return thumbnail
+    }
+
+    /// The desert scene's layers at rest.
+    static let desert: CGImage? = {
+        guard let scene = ParallaxScene.desert() else { return nil }
+        let preview = ZStack(alignment: .topLeading) {
+            ForEach(scene.layers.indices, id: \.self) { index in
+                let rect = ParallaxScene.rect(for: scene.layers[index], cardAspect: size.width / size.height, closer: 0)
+                Image(decorative: scene.layers[index].image, scale: 1)
+                    .resizable()
+                    .frame(width: rect.width * size.width, height: rect.height * size.height)
+                    .offset(x: rect.minX * size.width, y: rect.minY * size.height)
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .clipped()
+        let renderer = ImageRenderer(content: preview)
+        renderer.scale = 1
+        return renderer.cgImage
+    }()
+}
+
+/// The laptop from the side, two lines: the base lying flat and the lid at its angle, following it
+/// every frame. With a `target`, a dashed line shows where to move the lid, and the lid turns
+/// green within `tolerance` degrees of it. The lid is a layer that's turned, rather than a view
+/// that's redrawn, so it moves smoothly without drawing the panel again.
+struct LidGlyph: NSViewRepresentable {
+    var sensor: LidSensor
+    var target: Double? = nil
+    var tolerance = 5.0
+    var lineWidth: CGFloat = 2.5
+
+    static let size = CGSize(width: 34, height: 26)
+
+    func makeNSView(context: Context) -> GlyphView {
+        let view = GlyphView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: GlyphView, context: Context) {
+        view.sensor = sensor
+        view.lineWidth = lineWidth
+        view.tolerance = tolerance
+        view.target = target
+    }
+
+    final class GlyphView: NSView {
+        var sensor: LidSensor?
+        var lineWidth: CGFloat = 2.5 { didSet { if lineWidth != oldValue { needsLayout = true } } }
+        var tolerance = 5.0
+        var target: Double? { didSet { if target != oldValue { shownAngle = nil; needsLayout = true } } }
+        private let base = CAShapeLayer()
+        private let lid = CAShapeLayer()
+        private let aim = CAShapeLayer()
+        private var link: CADisplayLink?
+        private var shownAngle: Double?
+        private var colors = (base: CGColor.black, lid: CGColor.black, onTarget: CGColor.black, aim: CGColor.black)
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            // Hosting the layers itself, so AppKit never redraws anything here.
+            layer = CALayer()
+            wantsLayer = true
+            for line in [aim, base, lid] {
+                line.lineCap = .round
+                line.fillColor = nil
+                line.actions = ["transform": NSNull(), "strokeColor": NSNull(), "path": NSNull(),
+                                "position": NSNull(), "hidden": NSNull()]
+                layer?.addSublayer(line)
+            }
+        }
+
+        required init?(coder: NSCoder) { fatalError("not used") }
+
+        override var intrinsicContentSize: NSSize { LidGlyph.size }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        /// The hinge sits a little left of middle, so the lid has room to lean back past upright.
+        override func layout() {
+            super.layout()
+            let hinge = CGPoint(x: bounds.width * 0.38, y: lineWidth / 2 + 2)
+            let length = min(bounds.width * 0.56, bounds.height - lineWidth - 3)
+            let flat = CGMutablePath()
+            flat.move(to: hinge)
+            flat.addLine(to: CGPoint(x: hinge.x + length, y: hinge.y))
+            base.path = flat
+            // The lid and the aim are drawn lying along the base from the hinge, then turned about it.
+            let along = CGMutablePath()
+            along.move(to: .zero)
+            along.addLine(to: CGPoint(x: length, y: 0))
+            for line in [lid, aim] {
+                line.path = along
+                line.position = hinge
+                line.lineWidth = lineWidth
+            }
+            base.lineWidth = lineWidth
+            aim.lineDashPattern = [NSNumber(value: Double(lineWidth) * 1.2), NSNumber(value: Double(lineWidth) * 1.6)]
+            aim.isHidden = target == nil
+            if let target { aim.setAffineTransform(CGAffineTransform(rotationAngle: target * .pi / 180)) }
+            shownAngle = nil
+            if let link { step(link) }
+        }
+
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                colors = (NSColor.tertiaryLabelColor.cgColor, NSColor.labelColor.cgColor,
+                          NSColor.systemGreen.cgColor, NSColor.controlAccentColor.cgColor)
+            }
+            base.strokeColor = colors.base
+            aim.strokeColor = colors.aim
+            shownAngle = nil
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            link?.invalidate()
+            link = nil
+            guard let window else { return }
+            for line in [base, lid, aim] { line.contentsScale = window.backingScaleFactor }
+            viewDidChangeEffectiveAppearance()
+            let link = displayLink(target: self, selector: #selector(step(_:)))
+            link.add(to: .main, forMode: .common)
+            self.link = link
+            step(link)
+        }
+
+        @objc private func step(_ link: CADisplayLink) {
+            guard let angle = sensor?.angle, angle != shownAngle else { return }
+            shownAngle = angle
+            lid.setAffineTransform(CGAffineTransform(rotationAngle: angle * .pi / 180))
+            let onTarget = target.map { abs($0 - angle) <= tolerance } ?? false
+            lid.strokeColor = onTarget ? colors.onTarget : colors.lid
+        }
     }
 }

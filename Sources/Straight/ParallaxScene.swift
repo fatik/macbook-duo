@@ -68,6 +68,39 @@ struct ParallaxScene {
     }
 }
 
+/// Which way a scene's layers move as the lid moves.
+enum ParallaxMotion: String, CaseIterable {
+    /// They come closer, from the picture as it is, the nearest fastest.
+    case toward
+    /// They start as close as they come and move back to the picture as it is, the nearest fastest.
+    case away
+
+    var label: String {
+        switch self {
+        case .toward: "Toward you"
+        case .away: "Away from you"
+        }
+    }
+}
+
+/// How a scene's layers move with the lid.
+struct Parallax {
+    /// From 0 (they don't) to 1.
+    var strength: Double
+    /// Which lid movement moves them.
+    var direction: LidDirection
+    var motion: ParallaxMotion
+
+    /// How much closer than normal the nearest layer is at this lid angle, for a card anchored at
+    /// `anchor`; the others are closer by that times their depth.
+    func closer(anchor: Double, lidAngle: Double) -> Double {
+        let travel = direction.travel(from: anchor, to: lidAngle)
+        // Moving away is moving closer played backward, so the layers never shrink past the card's
+        // edges, where the pictures end.
+        return strength * ParallaxScene.closestZoom * (motion == .toward ? travel : 1 - travel)
+    }
+}
+
 /// How the clock is drawn, using SF Pro's variable axes.
 struct ClockStyle: Equatable {
     /// SF Pro's weight axis, from 1 (hairline) to 1000 (black).

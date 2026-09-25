@@ -141,7 +141,11 @@ struct Rig {
     /// held `frame`'s center when the lid was at `anchorAngle`. Every corner is traced from the eye,
     /// so as the lid moves the card is drawn smaller when the screen comes closer, larger when it
     /// moves away, and shifted to stay on the same line of sight, even if that's out of view.
-    func cardPose(frame: CGRect, mode: CardMode, anchorAngle: Double) -> CardPose? {
+    ///
+    /// `pinnedAtBottom` instead keeps the card's bottom edge on the screen where `frame` puts it,
+    /// wherever the screen is now, and leans the card from there the way `mode` says, like a card
+    /// standing on the screen's bottom edge.
+    func cardPose(frame: CGRect, mode: CardMode, anchorAngle: Double, pinnedAtBottom: Bool = false) -> CardPose? {
         let frameCenter = CGPoint(x: frame.midX, y: frame.midY)
         guard mode != .flat else {
             guard var pose = pose(center: world(fromDisplay: frameCenter), up: screenUp, size: frame.size, scale: 1)
@@ -159,15 +163,19 @@ struct Rig {
 
         var anchorRig = self
         anchorRig.lidAngle = anchorAngle
-        let anchor = anchorRig.world(fromDisplay: frameCenter)
+        var center = anchorRig.world(fromDisplay: frameCenter)
+        let up = cardUp(at: center, mode: mode, anchorAngle: anchorAngle)
+        if pinnedAtBottom {
+            let bottom = world(fromDisplay: CGPoint(x: frame.midX, y: frame.maxY))
+            center = bottom + up * (frame.height / 2 * placement.cmPerPoint)
+        }
 
         // How big the card's middle is drawn: its line of sight meets the screen nearer or farther
         // than the card itself.
-        guard let seen = display(fromWorld: anchor) else { return nil }
-        let scale = length(world(fromDisplay: seen) - eye) / length(anchor - eye)
+        guard let seen = display(fromWorld: center) else { return nil }
+        let scale = length(world(fromDisplay: seen) - eye) / length(center - eye)
 
-        let up = cardUp(at: anchor, mode: mode, anchorAngle: anchorAngle)
-        guard let pose = pose(center: anchor, up: up, size: frame.size, scale: scale) else { return nil }
+        guard let pose = pose(center: center, up: up, size: frame.size, scale: scale) else { return nil }
         let box = pose.boundingBox
         guard box.width <= frame.width * 8, box.height <= frame.height * 8 else { return nil }
         return pose

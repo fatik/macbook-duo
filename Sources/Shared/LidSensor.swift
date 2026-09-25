@@ -48,7 +48,14 @@ final class LidSensor {
     }
 
     private func frame(_ link: CADisplayLink) {
-        let now = link.timestamp
+        advance(to: link.timestamp)
+    }
+
+    /// Eases the angle toward the latest reading for the screen refresh at `now`. Something drawing
+    /// on its own display link can call this first so it draws the angle for that very refresh;
+    /// calling it again for the same refresh does nothing.
+    func advance(to now: CFTimeInterval) {
+        guard now > lastFrame else { return }
         let elapsed = lastFrame == 0 ? 1.0 / 60 : min(now - lastFrame, 0.1)
         lastFrame = now
         countFrames(at: now)

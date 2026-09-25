@@ -29,6 +29,9 @@ struct ContentView: View {
 
     @State private var sensor = LidSensor()
     @State private var calibrator = EyeCalibrator()
+    @State private var lineUp = EyeLineUp()
+    /// The calibration target's copies, shown on the card while lining it up by eye.
+    @State private var lineUpTarget: BlurAtlas?
     @State private var placement: ScreenPlacement?
     /// The lid angle at which the card was put in place; it stays at that spot in space from then on.
     @State private var anchorAngle: Double?
@@ -47,6 +50,10 @@ struct ContentView: View {
     @AppStorage("cornerRadius") private var cornerRadius = ControlPanel.defaultCornerRadius
     /// Whether the card covers the whole window instead of following the card width setting.
     @AppStorage("fillsWindow") private var fillsWindow = false
+    /// Whether the card's bottom edge stays on the screen's while it leans.
+    @AppStorage("pinnedAtBottom") private var pinnedAtBottom = true
+    /// The color around the card, as 0xRRGGBB.
+    @AppStorage("backgroundColor") private var backgroundColor = 0x000000
     private var blur = StoredEffect.blur()
     private var dim = StoredEffect.dim()
     @State private var image: CGImage?
@@ -60,6 +67,7 @@ struct ContentView: View {
     /// How strongly the scene's layers come toward you as the lid moves, from 0 to 1.
     @AppStorage("parallax") private var parallax = 0.6
     @AppStorage("parallaxDirection") private var parallaxDirection: LidDirection = .either
+    @AppStorage("parallaxMotion") private var parallaxMotion: ParallaxMotion = .toward
     @AppStorage("showsClock") private var showsClock = true
     @AppStorage("clockWeight") private var clockWeight = ClockStyle.phone.weight
     @AppStorage("clockWidth") private var clockWidth = ClockStyle.phone.width
@@ -89,109 +97,12 @@ struct ContentView: View {
                 PlacementReader { placement = $0 }
 
                 if let placement, sensor.isAvailable {
-                    let anchor = anchorAngle ?? sensor.angle
-                    let defaultDistance = Rig.defaultViewingDistance(for: placement)
-                    let eye = viewpoint == .screen
-                        ? Rig.screenViewpoint(anchorAngle: anchor, placement: placement,
-                                              distance: viewDistance > 0 ? viewDistance : defaultDistance,
-                                              lookingDown: lookingDown)
-                        : (distance: eyeDistance, height: eyeHeight)
-                    // Sensitivity scales how much the lid's movement since the anchor counts.
-                    let rig = Rig(lidAngle: anchor + sensitivity * (sensor.angle - anchor),
-                                  eyeDistance: eye.distance, eyeHeight: eye.height, placement: placement)
-                    let cardFrame = CGRect(x: placement.frame.minX + (size.width - cardSize.width) / 2,
-                                           y: placement.frame.minY + (size.height - cardSize.height) / 2,
-                                           width: cardSize.width, height: cardSize.height)
-
-                    let pose = rig.cardPose(frame: cardFrame, mode: mode, anchorAngle: anchor)
-
-                    // The card is drawn at its laid-out size and then warped, so render it bigger when
-                    // it's stretched to keep it sharp.
-                    let stretch = pose.map { max($0.boundingBox.width / cardSize.width,
-                                                 $0.boundingBox.height / cardSize.height) } ?? 1
-                    let sharpness = min(min(max((stretch - 0.1).rounded(.up), 1), 4), 2400 / max(cardSize.width, cardSize.height))
-                    let rendered = { (frame: CGRect) -> CGRect in
-                        frame.insetBy(dx: -frame.width * (sharpness - 1) / 2, dy: -frame.height * (sharpness - 1) / 2)
-                    }
+                    // Everything but the lid angle: the renderer and the status line follow the lid
+                    // on their own, so this view isn't rebuilt every frame.
+                    let setup = cardScene(placement: placement, windowSize: size, cardSize: cardSize)
                     let source = image ?? checkerboard
 
-                    Color.black
-
-                    // Hidden rather than drawn uncorrected when the lid is too far closed to draw it.
-                    Color.clear.overlay {
-                        if let pose {
-                            // The view reaches past the card so its outline can soften and spill out as
-                            // far as the blur spreads, and that bigger area is held in space the same way.
-                            let margin = blurMargin(cardSize: cardSize, strength: blur.strength,
-                                                    shape: blur.shape(lidAngle: sensor.angle, anchorAngle: anchor,
-                                                                      pose: pose, window: nil))
-                            let area = cardFrame.insetBy(dx: -margin.width, dy: -margin.height)
-                            let renderFrame = rendered(area)
-                            if let transform = rig.cardPose(frame: area, mode: mode, anchorAngle: anchor)?
-                                .transform(from: renderFrame) {
-                                // Filling the window pushes the card's own edges off-screen as the lid
-                                // moves, so edge fades come in from the window's edges instead.
-                                let toWindow = transform.translatedAfter(x: renderFrame.minX - placement.frame.minX,
-                                                                         y: renderFrame.minY - placement.frame.minY)
-                                let shape = blur.shape(lidAngle: sensor.angle, anchorAngle: anchor, pose: pose,
-                                                       window: fillsWindow ? (toWindow, size) : nil)
-                                // Corners the same size on screen whatever the card's size.
-                                let corner = cornerRadius / 10 / placement.cmPerPoint * sharpness
-                                let dimShape = dim.shape(lidAngle: sensor.angle, anchorAngle: anchor, pose: pose,
-                                                         window: fillsWindow ? (toWindow, size) : nil)
-                                let values = { (atlas: BlurAtlas, strength: Double, rect: CGRect?, shapesEdge: Bool) in
-                                    blurShaderValues(strength: strength, shape: shape,
-                                                     dim: dim.strength, dimShape: dimShape, atlas: atlas,
-                                                     cardSize: cardSize, margin: margin,
-                                                     crops: rect == nil && fillsWindow && image != nil,
-                                                     pictureRect: rect, cornerRadius: corner, shapesEdge: shapesEdge)
-                                }
-
-                                if let scene, sceneAtlases.count == scene.layers.count {
-                                    // The layers come toward you as the lid moves away from where the card
-                                    // was anchored, the nearest fastest; the clock stays put.
-                                    let closer = parallax * ParallaxScene.closestZoom
-                                        * travel(from: anchor, to: rig.lidAngle, direction: parallaxDirection)
-                                    ZStack {
-                                        ForEach(scene.layers.indices, id: \.self) { index in
-                                            // The clock sits between layers and dims with them. It can also
-                                            // move and blur like one.
-                                            if index == scene.clockBefore, showsClock, let clockAtlas {
-                                                BlurredCard(atlas: clockAtlas, values: values(
-                                                    clockAtlas, clockBlur,
-                                                    ParallaxScene.grown(CGRect(x: 0, y: 0, width: 1, height: 1),
-                                                                        by: closer * clockDepth),
-                                                    false))
-                                                .opacity(clockOpacity)
-                                                .blendMode(clockBlend.mode)
-                                            }
-                                            BlurredCard(atlas: sceneAtlases[index], values: values(
-                                                sceneAtlases[index], blur.strength,
-                                                ParallaxScene.rect(for: scene.layers[index],
-                                                                   cardAspect: cardSize.width / cardSize.height,
-                                                                   closer: closer),
-                                                false))
-                                        }
-                                        // The whole stack shaped by the card's outline at once.
-                                        CardOutside(values: values(sceneAtlases[0], blur.strength, nil, true))
-                                    }
-                                    .frame(width: renderFrame.width, height: renderFrame.height)
-                                    .projectionEffect(transform)
-                                } else if let atlas {
-                                    BlurredCard(atlas: atlas, values: values(atlas, blur.strength, nil, true))
-                                        .frame(width: renderFrame.width, height: renderFrame.height)
-                                        .projectionEffect(transform)
-                                } else if let source, let cardTransform = pose.transform(from: rendered(cardFrame)) {
-                                    // Until the blur's copies are ready.
-                                    Image(decorative: source, scale: 1)
-                                        .resizable()
-                                        .clipShape(.rect(cornerRadius: corner))
-                                        .frame(width: rendered(cardFrame).width, height: rendered(cardFrame).height)
-                                        .projectionEffect(cardTransform)
-                                }
-                            }
-                        }
-                    }
+                    CardRendererView(scene: setup, sensor: sensor)
                     // The sharp copy only needs to be about as big as the card is drawn; a bigger one
                     // would shimmer when shrunk. Remade only when that size changes by a fifth or so.
                     // A photo filling the window is trimmed to the window's shape first, since the
@@ -229,6 +140,15 @@ struct ContentView: View {
                         }
                         sceneAtlases = made
                     }
+                    // Lining up by eye shows a target the card's shape instead of the picture.
+                    .task(id: lineUp.isActive ? (Double(cardSize.width / cardSize.height) * 100).rounded() : nil) {
+                        guard lineUp.isActive else { return lineUpTarget = nil }
+                        let longSide = min(AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 2), 3456)
+                        guard let picture = CalibrationTarget.render(aspect: Double(cardSize.width / cardSize.height),
+                                                                     longSide: longSide)
+                        else { return }
+                        lineUpTarget = await BlurAtlas.make(from: picture, longSide: longSide)
+                    }
                     // The clock is redrawn as a picture whenever its style or the card changes, and
                     // again at the start of every minute.
                     .task(id: scene != nil && showsClock ? ClockRequest(
@@ -252,67 +172,64 @@ struct ContentView: View {
                         }
                     }
 
-                    if showsControls {
-                        VStack {
-                            Spacer()
-                            ControlPanel(
-                                cardWidth: cardSize.width * placement.cmPerPoint,
-                                hasImage: image != nil,
-                                canCalibrate: placement.isBuiltIn,
-                                calibrator: calibrator,
-                                defaultViewingDistance: defaultDistance,
-                                status: status(rig: rig, pose: pose, placement: placement, anchor: anchor),
-                                recenter: { anchorAngle = sensor.angle },
-                                fillWindow: {
-                                    fillsWindow = true
-                                    mode = .asPlaced
-                                    anchorAngle = sensor.angle
-                                },
-                                chooseImage: { isChoosingImage = true },
-                                clearImage: {
-                                    image = nil
-                                    imagePath = ""
-                                    scene = nil
-                                    sceneName = ""
-                                },
-                                hasScene: scene != nil,
-                                useScene: {
-                                    scene = ParallaxScene.desert()
-                                    sceneName = scene?.name ?? ""
-                                    image = nil
-                                    imagePath = ""
-                                },
-                                calibrate: { calibrate(cameraFromHinge: rig.cameraFromHinge) },
-                                isEdgeToEdge: isEdgeToEdge,
-                                toggleEdgeToEdge: { EdgeToEdge.shared.toggle() },
-                                hide: toggleControls)
-                        }
-                        .padding(16)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    if lineUp.isActive {
+                        // Where you're looking while lining up, below the target's circle.
+                        LineUpGuide(lineUp: lineUp, sensor: sensor, save: { saveLineUp(setup) },
+                                    finish: { lineUp.end() }, cancel: cancelLineUp)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                            .padding(.bottom, 40)
+                            .transition(.opacity)
+                    } else if showsControls {
+                        ControlPanel(
+                            setup: setup,
+                            sensor: sensor,
+                            cardWidth: cardSize.width * placement.cmPerPoint,
+                            source: scene != nil ? .desert : image != nil ? .image : .checkerboard,
+                            image: image,
+                            checkerboard: checkerboard,
+                            canCalibrate: placement.isBuiltIn,
+                            calibrator: calibrator,
+                            defaultViewingDistance: Rig.defaultViewingDistance(for: placement),
+                            isEdgeToEdge: isEdgeToEdge,
+                            lineUp: lineUp,
+                            actions: panelActions(setup))
+                        // In the corner, clear of the middle of the picture.
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding(20)
+                        .transition(.opacity.combined(with: .offset(x: 24)))
                     } else if showsControlsHint {
-                        VStack {
-                            Spacer()
-                            Text("Press X to show controls")
-                                .font(.callout)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 7)
-                                .background(Color(white: 0.12).opacity(0.94), in: .capsule)
+                        HStack(spacing: 6) {
+                            Text("Press")
+                            Text("X")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .frame(minWidth: 20, minHeight: 20)
+                                .background(Color.white.opacity(0.14), in: .rect(cornerRadius: 5))
+                            Text("for controls")
                         }
-                        .padding(24)
+                        .font(.system(size: 12.5))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color(white: 0.105).opacity(0.97), in: .capsule)
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.08)))
+                        .environment(\.colorScheme, .dark)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding(20)
                         .transition(.opacity)
                     }
                 } else {
-                    Color.black
+                    RGBColor(hex: backgroundColor).color
                     if !sensor.isAvailable {
                         Text("No lid angle sensor found")
                             .font(.title2.weight(.semibold))
                     }
                 }
 
-                // Invisible, but give the window its X, F and Esc shortcuts.
+                // Invisible, but give the window its X, F, R and Esc shortcuts.
                 Group {
                     Button("Toggle Controls", action: toggleControls)
                         .keyboardShortcut("x", modifiers: [])
+                    Button("Re-center") { if !lineUp.isActive { anchorAngle = sensor.angle } }
+                        .keyboardShortcut("r", modifiers: [])
                     Button("Toggle Full Screen") { EdgeToEdge.shared.toggle() }
                         .keyboardShortcut("f", modifiers: [])
                     if isEdgeToEdge {
@@ -360,14 +277,125 @@ struct ContentView: View {
         withAnimation(.easeInOut(duration: 0.2)) { showsControls.toggle() }
     }
 
-    /// How far the lid has moved from `anchor` toward `direction`, from 0 to 1 at 45°.
-    private func travel(from anchor: Double, to angle: Double, direction: LidDirection) -> Double {
-        let moved = switch direction {
-        case .opening: angle - anchor
-        case .closing: anchor - angle
-        case .either: abs(angle - anchor)
+    /// The card's setup from the current settings, for `CardRendererView` to draw at each lid angle.
+    /// What the panel's buttons do.
+    private func panelActions(_ setup: CardScene) -> PanelActions {
+        PanelActions(
+            recenter: { anchorAngle = sensor.angle },
+            fillWindow: {
+                fillsWindow = true
+                mode = .asPlaced
+                anchorAngle = sensor.angle
+            },
+            chooseImage: { isChoosingImage = true },
+            showCheckerboard: {
+                image = nil
+                imagePath = ""
+                scene = nil
+                sceneName = ""
+            },
+            showDesert: {
+                scene = ParallaxScene.desert()
+                sceneName = scene?.name ?? ""
+                image = nil
+                imagePath = ""
+            },
+            calibrateWithCamera: {
+                calibrate(cameraFromHinge: setup.rig(lidAngle: sensor.reading).rig.cameraFromHinge)
+            },
+            toggleEdgeToEdge: { EdgeToEdge.shared.toggle() },
+            hide: toggleControls,
+            startLineUp: { startLineUp(setup) },
+            saveLineUp: { saveLineUp(setup) },
+            finishLineUp: { lineUp.end() },
+            cancelLineUp: cancelLineUp)
+    }
+
+    /// Where a typical viewer's eyes are for a card anchored at `anchor`: worked out from the screen.
+    private func typicalEye(anchor: Double, placement: ScreenPlacement) -> (distance: Double, height: Double) {
+        Rig.screenViewpoint(anchorAngle: anchor, placement: placement,
+                            distance: viewDistance > 0 ? viewDistance : Rig.defaultViewingDistance(for: placement),
+                            lookingDown: lookingDown)
+    }
+
+    /// Re-centers the card here and starts lining it up by eye, from a typical viewpoint: the one
+    /// worked out from the screen, at 100% sensitivity.
+    private func startLineUp(_ setup: CardScene) {
+        let angle = sensor.angle
+        let eye = typicalEye(anchor: angle, placement: setup.placement)
+        lineUp.start(at: angle, previous: .init(viewpoint: viewpoint, eyeDistance: eyeDistance,
+                                                eyeHeight: eyeHeight, sensitivity: sensitivity))
+        anchorAngle = angle
+        viewpoint = .eyes
+        eyeDistance = eye.distance
+        eyeHeight = eye.height
+        sensitivity = 1
+    }
+
+    /// Keeps where the card is now as looking straight at this lid angle, and switches to the
+    /// viewpoint that best explains every angle lined up so far.
+    private func saveLineUp(_ setup: CardScene) {
+        let angle = sensor.angle
+        guard lineUp.isNew(angle) else {
+            lineUp.note = "Move the lid at least \(Int(EyeLineUp.spacing))° from the angles already used first."
+            return
         }
-        return min(max(moved / 45, 0), 1)
+        guard let corners = setup.pose(lidAngle: angle)?.corners else {
+            lineUp.note = "The card can't be drawn at this angle; open the lid a little."
+            return
+        }
+        let sample = EyeLineUp.Sample(lidAngle: angle, corners: corners)
+        guard let fit = setup.lineUpFit(lineUp.samples + [sample], anchor: lineUp.anchor,
+                                        typical: typicalEye(anchor: lineUp.anchor, placement: setup.placement))
+        else {
+            lineUp.note = "No believable viewpoint draws the card like that, so this angle wasn't saved. Line it "
+                + "up as a real card would sit: as the lid closes, its top should run off the top of the screen."
+            return
+        }
+        lineUp.add(sample, fit: fit)
+        eyeDistance = fit.eyeDistance
+        eyeHeight = fit.eyeHeight
+        sensitivity = fit.sensitivity
+    }
+
+    private func cancelLineUp() {
+        if let previous = lineUp.previous {
+            viewpoint = previous.viewpoint
+            eyeDistance = previous.eyeDistance
+            eyeHeight = previous.eyeHeight
+            sensitivity = previous.sensitivity
+        }
+        lineUp.end()
+    }
+
+    private func cardScene(placement: ScreenPlacement, windowSize: CGSize, cardSize: CGSize) -> CardScene {
+        var content: CardScene.Content
+        if let scene, sceneAtlases.count == scene.layers.count {
+            let clock = showsClock ? clockAtlas.map {
+                CardScene.Clock(atlas: $0, depth: clockDepth, blur: clockBlur, opacity: clockOpacity, blend: clockBlend)
+            } : nil
+            content = .layers(scene, sceneAtlases, clock: clock,
+                              parallax: Parallax(strength: parallax, direction: parallaxDirection, motion: parallaxMotion))
+        } else if scene == nil, let atlas {
+            content = .picture(atlas, crops: fillsWindow && image != nil)
+        } else {
+            content = .nothing
+        }
+        // Lining up shows the target plainly: no blur, dim or parallax to judge it through.
+        var blurNow = blur.current, dimNow = dim.current
+        if lineUp.isActive, let lineUpTarget {
+            content = .picture(lineUpTarget, crops: false)
+            blurNow.strength = 0
+            dimNow.strength = 0
+        }
+        var scene = CardScene(placement: placement, windowSize: windowSize, cardSize: cardSize, mode: mode,
+                         pinnedAtBottom: pinnedAtBottom, anchorAngle: anchorAngle, viewpoint: viewpoint,
+                         eyeDistance: eyeDistance, eyeHeight: eyeHeight, viewDistance: viewDistance,
+                         lookingDown: lookingDown, sensitivity: sensitivity, fillsWindow: fillsWindow,
+                         cornerRadius: cornerRadius, background: RGBColor(hex: backgroundColor),
+                         blur: blurNow, dim: dimNow, content: content)
+        scene.adjustment = lineUp.adjustment
+        return scene
     }
 
     private func calibrate(cameraFromHinge: Double) {
@@ -388,20 +416,6 @@ struct ContentView: View {
         imagePath = url.path
         return true
     }
-
-    private func status(rig: Rig, pose: CardPose?, placement: ScreenPlacement, anchor: Double) -> String {
-        guard placement.isBuiltIn else { return "Move this window to the built-in display" }
-        let fps = sensor.framesPerSecond.map { " · \($0) fps" } ?? ""
-        let lid = "Lid \(sensor.angle.formatted(.number.precision(.fractionLength(1))))°\(fps)"
-        guard mode != .flat else { return "\(lid) · no correction" }
-        guard let pose else { return "\(lid) · too far closed to draw the card from your eye position" }
-        let lean = rig.lean(of: pose.up)
-        let tilt = abs(lean) < 0.5 ? "in line with the screen"
-            : "tilted \(Int(abs(lean).rounded()))° \(lean > 0 ? "back" : "forward")"
-        let held = "held where it was at \(anchor.formatted(.number.precision(.fractionLength(1))))°"
-        guard pose.boundingBox.intersects(placement.frame) else { return "\(lid) · card \(held), now out of view" }
-        return "\(lid) · card \(held), \(tilt), drawn at \(Int((pose.scale * 100).rounded()))% size"
-    }
 }
 
 /// What the blur atlas is made from, roughly how big, and what shape it's trimmed to. Sizes are
@@ -419,16 +433,6 @@ struct AtlasRequest: Equatable {
 
     static func bucket(_ longSide: Double) -> Double {
         pow(2, (log2(max(longSide, 64)) * 4).rounded() / 4)
-    }
-}
-
-extension ProjectionTransform {
-    /// This transform followed by a move of (`x`, `y`).
-    func translatedAfter(x: Double, y: Double) -> ProjectionTransform {
-        var moved = self
-        moved.m11 += m13 * x; moved.m21 += m23 * x; moved.m31 += m33 * x
-        moved.m12 += m13 * y; moved.m22 += m23 * y; moved.m32 += m33 * y
-        return moved
     }
 }
 
