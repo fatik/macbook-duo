@@ -24,7 +24,7 @@ final class EdgeToEdge {
         else { return }
 
         let window = KeyableWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
-        window.contentView = NSHostingView(rootView: ContentView(isEdgeToEdge: true))
+        window.contentView = NSHostingView(rootView: ShowcaseView(isEdgeToEdge: true))
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false

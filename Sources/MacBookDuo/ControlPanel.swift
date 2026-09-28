@@ -50,7 +50,7 @@ struct ControlPanel: View {
             case .picture: "Picture"
             case .scene: "Scene"
             case .look: "Look"
-            case .viewer: "Viewer"
+            case .viewer: "Calibration"
             }
         }
 
@@ -84,7 +84,7 @@ struct ControlPanel: View {
     @AppStorage("eyeHeight") private var eyeHeight = 35.0
     @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
     @AppStorage("viewDistance") private var viewDistance = 0.0
-    @AppStorage("viewLookingDown") private var lookingDown = 0.0
+    @AppStorage("viewLookingDown") private var lookingDown = Defaults.typicalLookingDown
     private var blur = StoredEffect.blur()
     private var dim = StoredEffect.dim()
 
@@ -144,13 +144,13 @@ struct ControlPanel: View {
 
     private var header: some View {
         LiveReadout(scene: setup, sensor: sensor) {
-            PillButton(symbol: "scope", title: "Re-center", help: "Hold the card where the screen is now (R)",
+            PillButton(symbol: "scope", title: "Re-center", help: "Re-center the picture (R)",
                        action: actions.recenter)
                 .disabled(lineUp.isActive)
             RoundButton(symbol: isEdgeToEdge ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                        help: isEdgeToEdge ? "Leave full screen (F or Esc)" : "Full screen, edge to edge (F)",
+                        help: isEdgeToEdge ? "Exit Full Screen (F)" : "Full Screen (F)",
                         action: actions.toggleEdgeToEdge)
-            RoundButton(symbol: "xmark", help: "Hide the controls (X)", action: actions.hide)
+            RoundButton(symbol: "xmark", help: "Hide controls (X)", action: actions.hide)
         }
         .padding(.horizontal, 2)
     }
@@ -163,11 +163,10 @@ struct ControlPanel: View {
                 HStack(spacing: 10) {
                     PictureTile(title: "Checkerboard", thumbnail: checkerboard.flatMap(Thumbnails.of),
                                 isSelected: source == .checkerboard, action: actions.showCheckerboard)
-                        .help("A checkerboard with a circle: when the illusion works, the squares look square.")
+                        .help("A test pattern: when the effect is right, the squares look square.")
                     PictureTile(title: "Desert", thumbnail: Thumbnails.desert, isSelected: source == .desert,
                                 action: actions.showDesert)
-                        .help("A layered scene with a lock-screen clock: its layers move at different speeds as the "
-                              + "lid moves.")
+                        .help("A layered desert scene, with a clock.")
                     PictureTile(title: image == nil ? "Your Image" : "Change…",
                                 thumbnail: image.flatMap(Thumbnails.of), placeholder: "plus",
                                 isSelected: source == .image, action: actions.chooseImage)
@@ -185,7 +184,7 @@ struct ControlPanel: View {
                         .controlSize(.mini)
                         .labelsHidden()
                 }
-                .help("Stretch the card over the whole window, held in place from the current lid angle.")
+                .help("Fill the window with the picture.")
                 RowDivider()
                 // Dragging the width takes the card back out of filling the window.
                 SliderRow("Width", value: Binding(get: { cardFill }, set: { cardFill = $0; fillsWindow = false }),
@@ -195,26 +194,11 @@ struct ControlPanel: View {
             PanelSection("Frame") {
                 SliderRow("Corners", value: $cornerRadius, in: 0...10,
                           shown: cornerRadius.formatted(.number.precision(.fractionLength(1))) + " mm",
-                          help: "Rounds the card's top corners; the bottom ones stay square, like a MacBook's screen. "
-                              + "To match your screen's own, fill the window at your usual angle and adjust until the "
-                              + "card's top corners sit exactly in the screen's.")
+                          help: "Rounds the top corners to match your screen's.")
                 RowDivider()
                 PanelRow("Background") {
-                    HStack(spacing: 8) {
-                        if backgroundColor != 0x000000 {
-                            Button("Black") { backgroundColor = 0x000000 }
-                                .buttonStyle(.borderless)
-                                .font(.system(size: 11.5))
-                        }
-                        ColorPicker("Background",
-                                    selection: Binding(get: { RGBColor(hex: backgroundColor).color },
-                                                       set: { backgroundColor = RGBColor($0).hex }),
-                                    supportsOpacity: false)
-                            .labelsHidden()
-                    }
+                    SwatchPicker(selection: $backgroundColor)
                 }
-                .help("The color around the card, which shows as the lid moves it away from the window's edges, "
-                      + "and through any clear parts of a picture.")
             }
         }
     }
@@ -227,8 +211,7 @@ struct ControlPanel: View {
             VStack(alignment: .leading, spacing: 14) {
                     PanelSection("Parallax") {
                         SliderRow("Strength", value: $parallax, shown: percent(parallax),
-                                  help: "How strongly the layers move as the lid moves: the sand most, the mountains "
-                                      + "less, the sky barely.")
+                                  help: "How much the layers move as you tilt.")
                         RowDivider()
                         PanelRow("Direction") {
                             Picker("Direction", selection: $parallaxMotion) {
@@ -238,11 +221,10 @@ struct ControlPanel: View {
                             .labelsHidden()
                             .fixedSize()
                         }
-                        .help("Toward you: the layers come closer as the lid moves. Away from you: they start as close "
-                              + "as they come at the anchored angle and move back to the picture as it is.")
+                        .help("Toward you: the layers come closer as you tilt. Away: they start close and move back.")
                         RowDivider()
                         MenuRow("Moves when", selection: $parallaxDirection, options: LidDirection.allCases, label: \.label)
-                            .help("Which lid movement moves the layers. They move fully once the lid has moved 45°.")
+                            .help("Which way of tilting moves the layers.")
                     }
 
                     PanelSection("Clock", accessory: {
@@ -253,34 +235,31 @@ struct ControlPanel: View {
                     }) {
                         if showsClock {
                             SliderRow("Width", value: $clockWidth, in: 30...150, shown: "\(Int(clockWidth.rounded()))",
-                                      help: "SF Pro's width axis: 30 is very compressed, 100 normal, 150 very expanded.")
+                                      help: "30 is condensed, 150 is expanded.")
                             RowDivider()
                             SliderRow("Weight", value: $clockWeight, in: 100...900, shown: "\(Int(clockWeight.rounded()))",
-                                      help: "SF Pro's weight axis: 100 is thin, 400 regular, 900 heavy.")
+                                      help: "100 is thin, 900 is heavy.")
                             RowDivider()
                             SliderRow("Height", value: $clockStretch, in: 1...2.2,
                                       shown: clockStretch.formatted(.number.precision(.fractionLength(1))) + "×",
-                                      help: "Stretches the numerals taller, like a lock screen's clock.")
+                                      help: "Makes the numbers taller.")
                             RowDivider()
                             SliderRow("Opacity", value: $clockOpacity, shown: percent(clockOpacity))
                             RowDivider()
                             MenuRow("Blend", selection: $clockBlend, options: ClockBlend.allCases, label: \.label)
-                                .help("How the clock mixes with the picture behind it. Plus Lighter and Screen let the "
-                                      + "sky's color show through, like frosted glass.")
+                                .help("How the clock blends with the sky.")
                             RowDivider()
                             DisclosureRow("Motion", isExpanded: $showsClockMotion)
                             if showsClockMotion {
                                 RowDivider()
                                 SliderRow("Depth", value: $clockDepth, shown: clockDepth < 0.005 ? "Fixed" : percent(clockDepth),
-                                          help: "Whether the clock moves with the parallax like a layer. At 0 it stays put; "
-                                              + "the sky moves like 12% and the mountains like 50%.")
+                                          help: "How much the clock moves with the layers.")
                                 RowDivider()
                                 SliderRow("Blur", value: $clockBlur, shown: clockBlur < 0.005 ? "Sharp" : percent(clockBlur),
-                                          help: "How much the clock blurs where the scene does. At 0 it stays sharp and "
-                                              + "only dims.")
+                                          help: "How much the clock blurs with the scene.")
                             }
                         } else {
-                            Text("The date and time sit between the sky and the mountains, like a phone's lock screen.")
+                            Text("The date and time, like a lock screen.")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -292,8 +271,7 @@ struct ControlPanel: View {
         } else {
             PanelSection("Desert") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("A layered scene: its sky, mountains and sand come toward you at different speeds as the lid "
-                         + "moves, with a lock-screen clock between them. Its settings are here once it's showing.")
+                    Text("Sky, mountains and sand that move at different speeds, with a clock.")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -317,21 +295,17 @@ struct ControlPanel: View {
                                isExpanded: Binding<Bool>) -> some View {
         PanelSection(title) {
             SliderRow("Strength", value: effect.$strength, shown: effect.strength < 0.005 ? "Off" : percent(effect.strength),
-                      help: verb == "Dims" ? "How dark it gets where it's full. At 100% it goes black."
-                                           : "How blurred it gets where it's full.")
+                      help: verb == "Dims" ? "How dark it gets." : "How blurry it gets.")
             RowDivider()
             MenuRow("Follows", selection: effect.$edge, options: EffectEdge.allCases, label: \.label)
-                .help("Depth follows how far each part of the card is from the screen, like a lens focused on it. "
-                      + "An edge fades it in from that edge.")
+                .help("Depth goes by distance from the screen. An edge fades in from that side.")
             RowDivider()
             if effect.edge == .depth {
                 SliderRow("Full at", value: effect.$spread, in: 0.05...1, shown: "\(Int(effect.fullDepth.rounded())) cm",
-                          help: "How much farther away (or nearer) than the screen a part has to be for the full "
-                              + "effect. What's in focus is left alone.")
+                          help: "How far from the screen it reaches full strength.")
             } else {
                 SliderRow("Reach", value: effect.$spread, in: 0.05...StoredEffect.longestReach, shown: percent(effect.spread),
-                          help: "How far in from the edge it goes. It eases out toward its end, so past 100% it "
-                              + "carries on across the far side.")
+                          help: "How far in from the edge it goes.")
             }
             RowDivider()
             DisclosureRow("More", isExpanded: isExpanded)
@@ -339,12 +313,10 @@ struct ControlPanel: View {
                 RowDivider()
                 if effect.edge == .depth {
                     MenuRow("\(verb)", selection: effect.$depthSide, options: DepthSide.allCases, label: \.label)
-                        .help("Which parts it applies to: those farther away than the screen, nearer, or both.")
+                        .help("Farther than the screen, nearer, or both.")
                 } else {
                     SliderRow("Lid reaction", value: effect.$lidReaction, shown: percent(effect.lidReaction),
-                              help: "How much the lid slides it in. At 0% it stays put. At 100% there's none at the "
-                                  + "anchored angle, and it slides in as the lid moves, fully after "
-                                  + "\(Int(StoredEffect.fullReachAfter))°.")
+                              help: "How much tilting brings it in. At 100%, there's none until you tilt.")
                     RowDivider()
                     MenuRow("Grows when", selection: effect.$lidDirection, options: LidDirection.allCases, label: \.label)
                         .disabled(effect.lidReaction == 0)
@@ -357,16 +329,16 @@ struct ControlPanel: View {
 
     private var viewerTab: some View {
         VStack(alignment: .leading, spacing: 14) {
-            PanelSection("Drawn for", accessory: {
+            PanelSection("Using", accessory: {
                 if viewpoint == .screen {
                     Button("Reset") {
                         viewDistance = 0
-                        lookingDown = 0
+                        lookingDown = Defaults.typicalLookingDown
                     }
                     .buttonStyle(.borderless)
                     .font(.system(size: 11))
-                    .disabled(viewDistance == 0 && lookingDown == 0)
-                    .help("Back to the usual distance and angle for the screen.")
+                    .disabled(viewDistance == 0 && lookingDown == Defaults.typicalLookingDown)
+                    .help("Back to the typical position.")
                 }
             }) {
                 Picker("Viewpoint", selection: $viewpoint) {
@@ -383,30 +355,23 @@ struct ControlPanel: View {
                                                          set: { viewDistance = $0 }),
                               in: 25...120,
                               shown: "\(Int((viewDistance > 0 ? viewDistance : defaultViewingDistance).rounded())) cm",
-                              help: "How far your eyes are from the screen. Closer makes its far edge's size change "
-                                  + "more as the lid moves.")
+                              help: "How far your eyes are from the screen.")
                     RowDivider()
                     SliderRow("Looking down", value: $lookingDown, in: -20...45, shown: "\(Int(lookingDown.rounded()))°",
-                              help: "How far above square-on you look at the screen from, at the anchored angle.")
+                              help: "How far above the screen's center you look from.")
                 } else {
                     SliderRow("Eye distance", value: $eyeDistance, in: EyeCalibrator.distanceRange,
                               shown: "\(Int(eyeDistance.rounded())) cm",
-                              help: "How far in front of the hinge your eyes are.")
+                              help: "How far your eyes are in front of the hinge.")
                     RowDivider()
                     SliderRow("Eye height", value: $eyeHeight, in: EyeCalibrator.heightRange,
                               shown: "\(Int(eyeHeight.rounded())) cm",
-                              help: "How far above the hinge your eyes are.")
+                              help: "How high your eyes are above the hinge.")
                 }
             }
 
             PanelSection("Calibrate") {
-                CalibrationRow(symbol: "hand.draw", title: "Line Up by Eye",
-                               detail: lineUp.fit.map(\.summary)
-                                   ?? "Straighten the card by eye at a few lid angles; the viewpoint that fits "
-                                      + "them all is used.",
-                               button: "Start", action: actions.startLineUp)
-                RowDivider()
-                CalibrationRow(symbol: "camera", title: "Use the Camera", detail: cameraMessage,
+                CalibrationRow(symbol: "camera", title: "Calibrate with Camera", detail: cameraMessage,
                                button: calibrator.isMeasuring ? "Stop" : "Start",
                                action: calibrator.isMeasuring ? calibrator.cancel : actions.calibrateWithCamera)
                     .disabled(!canCalibrate && !calibrator.isMeasuring)
@@ -416,6 +381,10 @@ struct ControlPanel: View {
                         .padding(.horizontal, 12)
                         .padding(.bottom, 10)
                 }
+                RowDivider()
+                CalibrationRow(symbol: "hand.draw", title: "Calibrate by Eye",
+                               detail: lineUp.fit.map(\.summary) ?? "Line up a target at two angles.",
+                               button: "Start", action: actions.startLineUp)
             }
         }
     }
@@ -423,11 +392,11 @@ struct ControlPanel: View {
     private var cameraMessage: String {
         switch calibrator.phase {
         case .idle:
-            canCalibrate ? "Watches your eyes while you tilt the screen." : "Needs the built-in display."
+            canCalibrate ? "Takes about 10 seconds." : "Needs your MacBook's screen."
         case .measuring(_, let seesFace):
-            seesFace ? "Keep your head still and slowly tilt the screen back and forth." : "Looking for your face…"
+            seesFace ? "Keep your head still and slowly tilt." : "Finding your face…"
         case .finished(let distance, let height):
-            "Your eyes are \(Int(distance.rounded())) cm in front of the hinge and \(Int(height.rounded())) cm above it."
+            "Your eyes: \(Int(distance.rounded())) cm away, \(Int(height.rounded())) cm up."
         case .failed(let message):
             message
         }
@@ -484,6 +453,36 @@ struct PanelSection<Content: View, Accessory: View>: View {
 extension PanelSection where Accessory == EmptyView {
     init(_ title: String, @ViewBuilder content: () -> Content) {
         self.init(title, accessory: { EmptyView() }, content: content)
+    }
+}
+
+/// A few colors to pick from with one click, the chosen one ringed.
+struct SwatchPicker: View {
+    @Binding var selection: Int
+
+    static let colors: [(name: String, hex: Int)] = [
+        ("Black", 0x000000), ("Graphite", 0x1C1C1E), ("Gray", 0x636366), ("White", 0xF2F2F2),
+        ("Night", 0x141B2D), ("Dusk", 0x3A2140), ("Sand", 0xC49A74),
+    ]
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ForEach(Self.colors, id: \.hex) { color in
+                Button { selection = color.hex } label: {
+                    Circle()
+                        .fill(Color(hex: UInt32(color.hex)))
+                        .overlay(Circle().strokeBorder(.white.opacity(0.18)))
+                        .frame(width: 18, height: 18)
+                        .padding(3)
+                        .overlay(Circle().strokeBorder(Color.duo, lineWidth: 2).opacity(selection == color.hex ? 1 : 0))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help(color.name)
+                .accessibilityLabel(color.name)
+                .accessibilityAddTraits(selection == color.hex ? .isSelected : [])
+            }
+        }
     }
 }
 
@@ -774,7 +773,7 @@ struct StepDots: View {
         HStack(spacing: 5) {
             ForEach(0..<total, id: \.self) { step in
                 Capsule()
-                    .fill(step < done ? Color.accentColor : Color.white.opacity(0.18))
+                    .fill(step < done ? Color.duo : Color.white.opacity(0.18))
                     .frame(width: step == done - 1 ? 16 : 6, height: 6)
             }
         }

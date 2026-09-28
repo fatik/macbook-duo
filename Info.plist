@@ -11,18 +11,30 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleExecutable</key>
-    <string>__NAME__</string>
+    <string>__EXECUTABLE__</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>__VERSION__</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>__BUILD__</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2026 Fatik Owais</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <true/>
 </dict>
 </plist>

@@ -110,8 +110,8 @@ final class EyeCalibrator {
         if covered >= Self.sweep, samples.count >= 40 { return finish() }
         guard now < deadline else {
             return fail(samples.isEmpty
-                ? "Couldn't see your face. Make sure the camera can see you, then try again."
-                : "The screen didn't move far enough. Tilt it about \(Int(Self.sweep))° back and forth while measuring.")
+                ? "Couldn't see your face. Make sure the camera can see you."
+                : "Tilt a little further: about \(Int(Self.sweep))° back and forth.")
         }
         phase = .measuring(progress: min(covered / Self.sweep, 1), seesFace: now.timeIntervalSince(lastFace) < 0.5)
     }
@@ -119,13 +119,13 @@ final class EyeCalibrator {
     private func finish() {
         stopCamera()
         guard let fit = Self.fit(samples, cameraFromHinge: cameraFromHinge) else {
-            return fail("Couldn't work out where your eyes are. Try again.")
+            return fail("Couldn't find your eyes. Try again.")
         }
         guard fit.rms < 1.5 else {
-            return fail("Your head moved while measuring. Try again, keeping it still while you tilt the screen.")
+            return fail("Your head moved. Keep it still while you tilt.")
         }
         guard Self.distanceRange.contains(fit.distance), Self.heightRange.contains(fit.height) else {
-            return fail("That measurement looks off. Sit where you normally do and try again.")
+            return fail("That didn't look right. Sit as usual and try again.")
         }
         onResult(fit.distance, fit.height)
         phase = .finished(distance: fit.distance, height: fit.height)
@@ -151,7 +151,7 @@ final class EyeCalibrator {
     static let heightRange = -10.0...80.0
 
     private static let noAccess =
-        "Camera access is off for Straight. Turn it on in System Settings › Privacy & Security › Camera, then try again."
+        "Camera access is off. Turn it on in System Settings › Privacy & Security › Camera."
 
     struct Sample {
         /// Lid angle in degrees.
@@ -201,7 +201,7 @@ private final class FrameReader: NSObject, AVCaptureVideoDataOutputSampleBufferD
     /// The typical gap between an adult's pupils, used as a ruler.
     static let pupilDistance = 6.3
 
-    let queue = DispatchQueue(label: "Straight.camera")
+    let queue = DispatchQueue(label: "MacBookDuo.camera")
     private let report: @Sendable (Double?) -> Void
     private let request = VNDetectFaceLandmarksRequest()
 

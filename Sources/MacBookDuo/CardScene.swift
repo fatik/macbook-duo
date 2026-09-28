@@ -156,16 +156,16 @@ struct CardScene {
 
     /// A few words on where the card is at this lid angle.
     func summary(lidAngle: Double) -> String {
-        guard placement.isBuiltIn else { return "Move to the built-in display" }
+        guard placement.isBuiltIn else { return "Move to your MacBook's screen" }
         let (rig, anchor) = rig(lidAngle: lidAngle)
-        if adjustment != nil { return "Lining up · moved \(Int(abs(lidAngle - anchor).rounded()))°" }
+        if adjustment != nil { return "Calibrating · \(Int(abs(lidAngle - anchor).rounded()))° from start" }
         guard let pose = pose(rig, anchor: anchor)
-        else { return "Too far closed to draw" }
-        let held = "Held at \(Int(anchor.rounded()))°"
-        guard pose.boundingBox.intersects(placement.frame) else { return "\(held) · out of view" }
+        else { return "Open the lid a little more" }
+        let centered = "Centered at \(Int(anchor.rounded()))°"
+        guard pose.boundingBox.intersects(placement.frame) else { return "\(centered) · out of view" }
         let lean = rig.lean(of: pose.up)
-        let tilt = abs(lean) < 0.5 ? "in line" : "\(Int(abs(lean).rounded()))° \(lean > 0 ? "back" : "forward")"
-        return "\(held) · \(tilt)"
+        let tilt = abs(lean) < 0.5 ? "level" : "tilted \(Int(abs(lean).rounded()))°"
+        return "\(centered) · \(tilt)"
     }
 }
 
@@ -179,19 +179,6 @@ struct RGBColor: Equatable {
         red = Double(hex >> 16 & 0xFF) / 255
         green = Double(hex >> 8 & 0xFF) / 255
         blue = Double(hex & 0xFF) / 255
-    }
-
-    /// The nearest sRGB color to `color`.
-    init(_ color: Color) {
-        let srgb = NSColor(color).usingColorSpace(.sRGB)
-        red = Double(srgb?.redComponent ?? 0)
-        green = Double(srgb?.greenComponent ?? 0)
-        blue = Double(srgb?.blueComponent ?? 0)
-    }
-
-    var hex: Int {
-        func byte(_ value: Double) -> Int { Int((min(max(value, 0), 1) * 255).rounded()) }
-        return byte(red) << 16 | byte(green) << 8 | byte(blue)
     }
 
     var color: Color { Color(.sRGB, red: red, green: green, blue: blue) }

@@ -11,8 +11,8 @@ final class ScreenMirror: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         case noDisplay, noOwnWindow
         var errorDescription: String? {
             switch self {
-            case .noDisplay: "Couldn't find the built-in display to capture."
-            case .noOwnWindow: "Couldn't leave Straight's own window out of the capture."
+            case .noDisplay: "Couldn't find your MacBook's display."
+            case .noOwnWindow: "Couldn't start Screen Effect. Try again."
             }
         }
     }

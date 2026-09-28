@@ -2,43 +2,27 @@ import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
-@main
-struct StraightApp: App {
-    @NSApplicationDelegateAdaptor private var delegate: AppDelegate
-
-    var body: some Scene {
-        Window("Straight", id: "main") {
-            ContentView()
-        }
-        .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 900, height: 640)
-
-        // Holding the real screen still runs from here.
-        MenuBarExtra("Straight", systemImage: "laptopcomputer") {
-            StillScreenMenu()
-        }
-    }
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        MainActor.assumeIsolated { StillScreen.shared.installHotKey() }
+/// The picture held still in space: the desert, the checkerboard or any image, on a card that stays put
+/// while the lid moves, with a toolbar for the everyday and the full control panel for the rest.
+struct ShowcaseView: View {
+    enum Mode {
+        /// Everything: the toolbar, the controls, calibrating, dropping in a picture.
+        case full
+        /// Just the desert, answering the lid, for the welcome.
+        case demo
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        MainActor.assumeIsolated { !StillScreen.shared.isOn }
-    }
-}
-
-struct ContentView: View {
+    private let mode: Mode
     /// Whether this is the copy shown edge to edge over the whole display.
     private let isEdgeToEdge: Bool
 
-    init(isEdgeToEdge: Bool = false) {
+    init(mode: Mode = .full, isEdgeToEdge: Bool = false) {
+        self.mode = mode
         self.isEdgeToEdge = isEdgeToEdge
     }
 
-    @State private var sensor = LidSensor()
+    private let sensor = LidSensor.shared
+    private let app = AppState.shared
     @State private var calibrator = EyeCalibrator()
     @State private var lineUp = EyeLineUp()
     /// The calibration target's texture, shown on the card while lining it up by eye.
@@ -51,14 +35,16 @@ struct ContentView: View {
     @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
     /// 0 means the default for the screen.
     @AppStorage("viewDistance") private var viewDistance = 0.0
-    @AppStorage("viewLookingDown") private var lookingDown = 0.0
+    @AppStorage("viewLookingDown") private var lookingDown = Defaults.typicalLookingDown
     /// How much of the window the card may fill, in both directions.
     @AppStorage("cardSize") private var cardFill = 0.45
     @AppStorage("imagePath") private var imagePath = ""
     /// The card's corner radius in millimeters, to match the screen's own rounded corners.
     @AppStorage("cornerRadius") private var cornerRadius = ControlPanel.defaultCornerRadius
     /// Whether the card covers the whole window instead of following the card width setting.
-    @AppStorage("fillsWindow") private var fillsWindow = false
+    @AppStorage("fillsWindow") private var fillsWindow = true
+    /// Whether the card covers the whole window: as set, or always for the welcome's demo.
+    private var fills: Bool { mode == .demo || fillsWindow }
     /// The color around the card, as 0xRRGGBB.
     @AppStorage("backgroundColor") private var backgroundColor = 0x000000
     private var blur = StoredEffect.blur()
@@ -88,8 +74,8 @@ struct ContentView: View {
     @State private var clockAtlas: PictureTexture?
     @State private var isChoosingImage = false
     @State private var isDropTargeted = false
-    @State private var showsControls = true
-    @State private var showsControlsHint = false
+    @State private var showsControls = false
+    @State private var asksForScreenRecording = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -98,7 +84,7 @@ struct ContentView: View {
             let aspect = scene != nil ? ParallaxScene.aspect
                 : image.map { min(max(Double($0.width) / Double($0.height), 0.2), 5) } ?? 1.5
             let cardWidth = min(size.width * cardFill, size.height * cardFill * aspect)
-            let cardSize = fillsWindow ? size : CGSize(width: cardWidth, height: cardWidth / aspect)
+            let cardSize = fills ? size : CGSize(width: cardWidth, height: cardWidth / aspect)
 
             ZStack {
                 PlacementReader { placement = $0 }
@@ -115,12 +101,12 @@ struct ContentView: View {
                     // A photo filling the window is trimmed to the window's shape first, since the
                     // rest never shows.
                     .task(id: AtlasRequest(source: source, longSide: max(cardSize.width, cardSize.height) * 3,
-                                           aspect: fillsWindow && image != nil ? size.width / size.height : nil)) {
+                                           aspect: fills && image != nil ? size.width / size.height : nil)) {
                         guard let source else { return }
                         // A different picture shouldn't show the last one while its own is made.
                         if atlas?.source != ObjectIdentifier(source) { atlas = nil }
                         let request = AtlasRequest(source: source, longSide: max(cardSize.width, cardSize.height) * 3,
-                                                   aspect: fillsWindow && image != nil ? size.width / size.height : nil)
+                                                   aspect: fills && image != nil ? size.width / size.height : nil)
                         if let made = await PictureTexture.make(from: source, longSide: min(request.longSide, 3456),
                                                            aspect: request.aspect) {
                             atlas = made
@@ -176,13 +162,33 @@ struct ContentView: View {
                         }
                     }
 
-                    if lineUp.isActive {
+                    if mode == .demo {
+                        // Nothing over the picture: the welcome says the rest.
+                    } else if !placement.isBuiltIn {
+                        DuoCard(width: 420) {
+                            Label("Move this window to your MacBook's screen", systemImage: "macbook")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("The effect follows your MacBook's lid.")
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 6)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if lineUp.isActive {
                         // Where you're looking while lining up, below the target's circle.
                         LineUpGuide(lineUp: lineUp, sensor: sensor, save: { saveLineUp(setup) },
                                     finish: { lineUp.end() }, cancel: cancelLineUp)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                             .padding(.bottom, 40)
                             .transition(.opacity)
+                    } else if calibrator.phase != .idle {
+                        // Where you're looking while the camera measures, with each step to take.
+                        CameraGuide(calibrator: calibrator, sensor: sensor) {
+                            calibrate(cameraFromHinge: setup.rig(lidAngle: sensor.reading).rig.cameraFromHinge)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, 40)
+                        .transition(.opacity)
                     } else if showsControls {
                         ControlPanel(
                             setup: setup,
@@ -201,49 +207,26 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                         .padding(20)
                         .transition(.opacity.combined(with: .offset(x: 24)))
-                    } else if showsControlsHint {
-                        HStack(spacing: 6) {
-                            Text("Press")
-                            Text("X")
-                                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                .frame(minWidth: 20, minHeight: 20)
-                                .background(Color.white.opacity(0.14), in: .rect(cornerRadius: 5))
-                            Text("for controls")
+                    } else {
+                        AutoHidingToolbar(isEdgeToEdge: isEdgeToEdge) { choosesCalibration in
+                            ShowcaseToolbar(sensor: sensor, isEdgeToEdge: isEdgeToEdge,
+                                            recenter: { anchorAngle = sensor.angle },
+                                            fullScreen: { EdgeToEdge.shared.toggle() },
+                                            lineUp: startLineUp,
+                                            camera: { calibrate(cameraFromHinge: setup.rig(lidAngle: sensor.reading).rig.cameraFromHinge) },
+                                            showControls: toggleControls,
+                                            choosesCalibration: choosesCalibration)
                         }
-                        .font(.system(size: 12.5))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Color(white: 0.105).opacity(0.97), in: .capsule)
-                        .overlay(Capsule().strokeBorder(.white.opacity(0.08)))
-                        .environment(\.colorScheme, .dark)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                        .padding(20)
                         .transition(.opacity)
                     }
                 } else {
                     RGBColor(hex: backgroundColor).color
-                    if !sensor.isAvailable {
-                        Text("No lid angle sensor found")
-                            .font(.title2.weight(.semibold))
-                    }
                 }
 
                 // Invisible, but give the window its X, F, R and Esc shortcuts.
-                Group {
-                    Button("Toggle Controls", action: toggleControls)
-                        .keyboardShortcut("x", modifiers: [])
-                    Button("Re-center") { if !lineUp.isActive { anchorAngle = sensor.angle } }
-                        .keyboardShortcut("r", modifiers: [])
-                    Button("Toggle Full Screen") { EdgeToEdge.shared.toggle() }
-                        .keyboardShortcut("f", modifiers: [])
-                    if isEdgeToEdge {
-                        Button("Exit Full Screen") { EdgeToEdge.shared.exit() }
-                            .keyboardShortcut(.escape, modifiers: [])
-                    }
+                if mode == .full {
+                    shortcuts
                 }
-                .opacity(0)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
 
                 if isDropTargeted {
                     RoundedRectangle(cornerRadius: 18)
@@ -257,24 +240,57 @@ struct ContentView: View {
         .onAppear {
             anchorAngle = sensor.angle
             checkerboard = renderCheckerboard()
-            if sceneName == "desert" { scene = ParallaxScene.desert() }
-            if !imagePath.isEmpty, !useImage(at: URL(fileURLWithPath: imagePath)) { imagePath = "" }
+            if mode == .demo || sceneName == "desert" { scene = ParallaxScene.desert() }
+            if mode == .full, !imagePath.isEmpty, !useImage(at: URL(fileURLWithPath: imagePath)) { imagePath = "" }
         }
-        .task(id: showsControls) {
-            // After hiding the controls, say how to get them back, then get out of the way.
-            showsControlsHint = !showsControls
-            guard !showsControls else { return }
-            try? await Task.sleep(for: .seconds(2))
-            withAnimation(.easeOut(duration: 0.4)) { showsControlsHint = false }
+        // Asked for from the welcome, the menu bar or Settings, once the window knows where it is.
+        .onChange(of: app.request, initial: true) { handleRequest() }
+        .onChange(of: placement) { handleRequest() }
+        .sheet(isPresented: $asksForScreenRecording) {
+            ScreenRecordingSheet()
         }
         .fileImporter(isPresented: $isChoosingImage, allowedContentTypes: [.image]) { result in
             if case .success(let url) = result { useImage(at: url) }
         }
         .dropDestination(for: URL.self) { urls, _ in
-            urls.first.map { useImage(at: $0) } ?? false
-        } isTargeted: { isDropTargeted = $0 }
+            guard mode == .full else { return false }
+            return urls.first.map { useImage(at: $0) } ?? false
+        } isTargeted: { isDropTargeted = mode == .full && $0 }
         .preferredColorScheme(.dark)
-        .frame(minWidth: 520, minHeight: 480)
+    }
+
+    /// The window's single-key shortcuts: X for the controls, R to re-center, F for full screen.
+    private var shortcuts: some View {
+        Group {
+                    Button("Toggle Controls", action: toggleControls)
+                        .keyboardShortcut("x", modifiers: [])
+                    Button("Re-center") { if !lineUp.isActive { anchorAngle = sensor.angle } }
+                        .keyboardShortcut("r", modifiers: [])
+                    Button("Toggle Full Screen") { EdgeToEdge.shared.toggle() }
+                        .keyboardShortcut("f", modifiers: [])
+                    if isEdgeToEdge {
+                        Button("Exit Full Screen") { EdgeToEdge.shared.exit() }
+                            .keyboardShortcut(.escape, modifiers: [])
+                    }
+                }
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func handleRequest() {
+        guard mode == .full, let request = app.request, let placement else { return }
+        app.request = nil
+        switch request {
+        case .lineUp:
+            showsControls = false
+            startLineUp()
+        case .camera:
+            let rig = Rig(lidAngle: sensor.reading, eyeDistance: eyeDistance, eyeHeight: eyeHeight, placement: placement)
+            calibrate(cameraFromHinge: rig.cameraFromHinge)
+        case .screenPermission:
+            asksForScreenRecording = true
+        }
     }
 
     private func toggleControls() {
@@ -308,29 +324,24 @@ struct ContentView: View {
             },
             toggleEdgeToEdge: { EdgeToEdge.shared.toggle() },
             hide: toggleControls,
-            startLineUp: { startLineUp(setup) },
+            startLineUp: startLineUp,
             saveLineUp: { saveLineUp(setup) },
             finishLineUp: { lineUp.end() },
             cancelLineUp: cancelLineUp)
     }
 
-    /// Where a typical viewer's eyes are for a card anchored at `anchor`: worked out from the screen.
-    private func typicalEye(anchor: Double, placement: ScreenPlacement) -> (distance: Double, height: Double) {
-        Rig.screenViewpoint(anchorAngle: anchor, placement: placement,
-                            distance: viewDistance > 0 ? viewDistance : Rig.defaultViewingDistance(for: placement),
-                            lookingDown: lookingDown)
-    }
-
-    /// Re-centers the card here and starts lining it up by eye, from a typical viewpoint: the one
-    /// worked out from the screen.
-    private func startLineUp(_ setup: CardScene) {
+    /// Re-centers the card here and starts lining it up by eye, from the eye saved now: the viewer's
+    /// own, from the camera or an earlier line-up, or else where one usually is at a desk. The "From
+    /// the screen" distance and looking-down settings aren't used; they only stand in for an eye, and
+    /// are often left far from it.
+    private func startLineUp() {
         let angle = sensor.angle
-        let eye = typicalEye(anchor: angle, placement: setup.placement)
-        lineUp.start(at: angle, previous: .init(viewpoint: viewpoint, eyeDistance: eyeDistance, eyeHeight: eyeHeight))
+        lineUp.start(at: angle, from: (eyeDistance, eyeHeight),
+                     previous: .init(viewpoint: viewpoint, eyeDistance: eyeDistance, eyeHeight: eyeHeight))
         anchorAngle = angle
         viewpoint = .eyes
-        eyeDistance = eye.distance
-        eyeHeight = eye.height
+        eyeDistance = lineUp.startingEye.distance
+        eyeHeight = lineUp.startingEye.height
     }
 
     /// Keeps where the card is now as looking straight at this lid angle, and switches to the
@@ -338,19 +349,37 @@ struct ContentView: View {
     private func saveLineUp(_ setup: CardScene) {
         let angle = sensor.angle
         guard lineUp.isNew(angle) else {
-            lineUp.note = "Move the lid at least \(Int(EyeLineUp.spacing))° from the angles already used first."
+            lineUp.note = "Move the lid at least \(Int(EyeLineUp.spacing))° further first."
             return
         }
         guard let corners = setup.pose(lidAngle: angle)?.corners else {
-            lineUp.note = "The card can't be drawn at this angle; open the lid a little."
+            lineUp.note = "Open the lid a little more."
             return
         }
         let sample = EyeLineUp.Sample(lidAngle: angle, corners: corners)
-        guard let fit = setup.lineUpFit(lineUp.samples + [sample], anchor: lineUp.anchor,
-                                        typical: typicalEye(anchor: lineUp.anchor, placement: setup.placement))
+        guard let fit = setup.lineUpFit(lineUp.samples + [sample], anchor: lineUp.anchor, guess: lineUp.startingEye)
         else {
-            lineUp.note = "No believable viewpoint draws the card like that, so this angle wasn't saved. Line it "
-                + "up as a real card would sit: as the lid closes, its top should run off the top of the screen."
+            lineUp.note = "That doesn't match a real viewing position. As the lid closes, the target's top "
+                + "should run off the screen."
+            return
+        }
+        // A first line-up that no eye quite draws took a big nudge, from a starting eye far off: the eye
+        // it points to is only nearer the viewer's, so the card is drawn for that eye and the same angle
+        // lined up again, now with a small nudge that moving the eye can match.
+        if lineUp.samples.isEmpty, fit.error > EyeLineUp.firstSlack {
+            eyeDistance = fit.eyeDistance
+            eyeHeight = fit.eyeHeight
+            lineUp.lean = 0
+            lineUp.lift = 0
+            lineUp.note = "Almost there. Line it up once more at this angle."
+            return
+        }
+        // Once there are two angles, an eye that misses them by more than a steady hand does didn't
+        // see them all, and saving it would spread that miss over every angle. A single angle can't
+        // disagree with itself: what little it's missed by is only the nudges not being quite the
+        // same as moving the eye.
+        guard lineUp.samples.isEmpty || fit.error <= EyeLineUp.slack else {
+            lineUp.note = "Those don't quite match. Close one eye, keep your head still, and try again."
             return
         }
         lineUp.add(sample, fit: fit)
@@ -376,7 +405,7 @@ struct ContentView: View {
             content = .layers(scene, sceneAtlases, clock: clock,
                               parallax: Parallax(strength: parallax, direction: parallaxDirection, motion: parallaxMotion))
         } else if scene == nil, let atlas {
-            content = .picture(atlas, crops: fillsWindow && image != nil)
+            content = .picture(atlas, crops: fills && image != nil)
         } else {
             content = .nothing
         }
@@ -390,7 +419,7 @@ struct ContentView: View {
         var scene = CardScene(placement: placement, windowSize: windowSize, cardSize: cardSize,
                               anchorAngle: anchorAngle, viewpoint: viewpoint, eyeDistance: eyeDistance,
                               eyeHeight: eyeHeight, viewDistance: viewDistance, lookingDown: lookingDown,
-                              fillsWindow: fillsWindow, cornerRadius: cornerRadius,
+                              fillsWindow: fills, cornerRadius: cornerRadius,
                               background: RGBColor(hex: backgroundColor), blur: blurNow, dim: dimNow, content: content)
         scene.adjustment = lineUp.adjustment
         return scene
@@ -399,6 +428,7 @@ struct ContentView: View {
     private func calibrate(cameraFromHinge: Double) {
         calibrator.start(cameraFromHinge: cameraFromHinge, lidAngle: { [sensor] in sensor.reading }) { distance, height in
             withAnimation(.easeInOut(duration: 0.4)) {
+                viewpoint = .eyes
                 eyeDistance = distance
                 eyeHeight = height
             }
@@ -413,6 +443,160 @@ struct ContentView: View {
         sceneName = ""
         imagePath = url.path
         return true
+    }
+}
+
+/// The everyday controls, floating under the picture: the lid's angle, re-centering, holding the whole
+/// screen, calibrating, and the way to every control.
+struct ShowcaseToolbar: View {
+    var sensor: LidSensor
+    var isEdgeToEdge: Bool
+    var recenter: () -> Void
+    var fullScreen: () -> Void
+    var lineUp: () -> Void
+    var camera: () -> Void
+    var showControls: () -> Void
+    @Binding var choosesCalibration: Bool
+
+    @State private var angle: Double?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 7) {
+                LidGlyph(sensor: sensor)
+                    .frame(width: LidGlyph.size.width, height: LidGlyph.size.height)
+                Text(angle.map { $0.formatted(.number.precision(.fractionLength(0))) + "°" } ?? "–")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .frame(width: 36, alignment: .leading)
+            }
+            .padding(.leading, 8)
+            .help("The lid's angle")
+            PillButton(symbol: "scope", title: "Re-center", help: "Re-center the picture (R)", action: recenter)
+            PillButton(symbol: "rectangle.on.rectangle", title: "Screen Effect",
+                       help: "The effect on your whole screen (⌥⌘S)") { StillScreen.shared.turnOn() }
+            HStack(spacing: 2) {
+                PillButton(symbol: "camera", title: "Calibrate", help: "Calibrate with the camera", action: camera)
+                RoundButton(symbol: "chevron.down", help: "More ways to calibrate") { choosesCalibration = true }
+                    .popover(isPresented: $choosesCalibration, arrowEdge: .top) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            OptionRow(symbol: "camera", title: "Calibrate with Camera", badge: "Recommended",
+                                      detail: "Takes about 10 seconds.", isSelected: false) {
+                                choosesCalibration = false
+                                camera()
+                            }
+                            OptionRow(symbol: "hand.draw", title: "Calibrate by Eye",
+                                      detail: "Line up a target at two angles.", isSelected: false) {
+                                choosesCalibration = false
+                                lineUp()
+                            }
+                        }
+                        .padding(12)
+                        .frame(width: 340)
+                    }
+            }
+            PillButton(symbol: "slider.horizontal.3", title: "Controls", help: "All controls (X)", action: showControls)
+            RoundButton(symbol: isEdgeToEdge ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                        help: isEdgeToEdge ? "Exit Full Screen (F)" : "Full Screen (F)",
+                        action: fullScreen)
+        }
+        .padding(6)
+        .font(.system(size: 12.5))
+        // Solid and edged, not frosted or shadowed, like the control panel: it floats over the card.
+        .background(Color(white: 0.105).opacity(0.97), in: .capsule)
+        .overlay(Capsule().strokeBorder(.white.opacity(0.1)))
+        .padding(1)
+        .background(Color.black.opacity(0.35), in: .capsule)
+        .environment(\.colorScheme, .dark)
+        .task {
+            while !Task.isCancelled {
+                let now = sensor.angle
+                if angle.map({ abs($0 - now) >= 0.5 }) ?? true { angle = now }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+}
+
+/// The toolbar, out of the way until it's wanted: it slides away after a few seconds without the
+/// pointer moving, and comes back as soon as it moves. It's a view of its own, so following the
+/// pointer redraws nothing else.
+struct AutoHidingToolbar: View {
+    var isEdgeToEdge: Bool
+    var toolbar: (Binding<Bool>) -> ShowcaseToolbar
+
+    @State private var isShown = true
+    @State private var isHovered = false
+    @State private var choosesCalibration = false
+    /// When the pointer last moved, in a box, so moving it doesn't redraw anything by itself.
+    @State private var lastMove = LastMove()
+
+    private final class LastMove {
+        var time = Date()
+    }
+
+    /// Seconds without the pointer moving before the toolbar goes.
+    static let idle = 2.5
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            // Everywhere around it, only to notice the pointer moving.
+            Color.clear
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    guard case .active = phase else { return }
+                    lastMove.time = Date()
+                    if !isShown { withAnimation(.easeOut(duration: 0.2)) { isShown = true } }
+                }
+            toolbar($choosesCalibration)
+                .onHover { isHovered = $0 }
+                .padding(.bottom, 20)
+                .offset(y: isShown ? 0 : 90)
+                .opacity(isShown ? 1 : 0)
+                .allowsHitTesting(isShown)
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard isShown, !isHovered, !choosesCalibration,
+                      Date().timeIntervalSince(lastMove.time) > Self.idle
+                else { continue }
+                withAnimation(.easeInOut(duration: 0.35)) { isShown = false }
+                // In full screen the pointer goes too, as in a video.
+                if isEdgeToEdge { NSCursor.setHiddenUntilMouseMoves(true) }
+            }
+        }
+    }
+}
+
+/// Asking for Screen Recording from the picture's window, when holding the screen was asked for
+/// before it was allowed.
+struct ScreenRecordingSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    private let permission = ScreenRecordingPermission.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Screen Effect")
+                .font(.system(size: 22, weight: .bold))
+            Text("The Duo effect on everything on your screen. It settles back when you stop tilting.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("It needs Screen Recording permission. Nothing is recorded, and nothing leaves your Mac.")
+                .font(.system(size: 12.5))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            ScreenPermissionView()
+            HStack {
+                Spacer()
+                Button(permission.isGranted ? "Done" : "Not Now") { dismiss() }
+                    .buttonStyle(.secondary)
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .font(.system(size: 13.5))
+        .padding(26)
+        .frame(width: 470)
     }
 }
 

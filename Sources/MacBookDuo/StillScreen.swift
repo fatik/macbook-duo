@@ -5,14 +5,16 @@ import SwiftUI
 /// Holding the whole screen still while the lid moves: the built-in display's real picture, captured
 /// live and drawn back over itself the way the card is, held where the screen was when the lid
 /// started moving. Once the lid settles, it eases back onto the real screen and steps aside, until the
-/// lid moves again. It runs from the menu bar, over everything, and lets clicks through to what's
-/// really underneath.
+/// lid moves again. It runs over everything and lets clicks through to what's really underneath; it's
+/// turned on and off from MacBook Duo's window, its menu bar item or ⌥⌘S from anywhere.
 @MainActor
 @Observable
 final class StillScreen {
     static let shared = StillScreen()
 
     private(set) var isOn = false
+    /// Whether the screen is being held right now, rather than showing as it really is.
+    private(set) var isHolding = false
     /// Why it couldn't start, or stopped, if it did.
     private(set) var problem: String?
 
@@ -30,7 +32,7 @@ final class StillScreen {
     /// would be caught too, but holding it then barely shows.
     static let wakeAngle = 0.25
     /// How many seconds the lid stays still before the screen eases back.
-    static let settleTime = 0.5
+    static var settleTime: Double { UserDefaults.standard.double(forKey: Defaults.holdSettleTime) }
     /// Frames a second captured while the lid rests: enough that the picture is barely behind when the
     /// lid moves, without capturing the whole screen at full speed all the time.
     static let restingRate = 15
@@ -45,22 +47,51 @@ final class StillScreen {
     /// Frames a second captured while the screen is held: as often as the display refreshes.
     @ObservationIgnored private var fullRate = 60
     @ObservationIgnored private let mirror = ScreenMirror()
-    @ObservationIgnored let sensor = LidSensor()
+    @ObservationIgnored let sensor = LidSensor.shared
     @ObservationIgnored private var hotKey: GlobalHotKey?
-    /// Straight's own windows, hidden while it's on, to bring back after.
-    @ObservationIgnored private var hidden: [NSWindow] = []
+    /// Turned off for sleep, a locked screen or a display change, to come back on after.
+    @ObservationIgnored private var resumes = false
 
     private init() {
         // If capturing ends (Stop Sharing, say), there's no picture to hold the screen with.
         mirror.onStop = { [weak self] in
             guard let self, window != nil else { return }
             turnOff()
-            problem = "Screen sharing was stopped, so the screen isn't held anymore."
+            problem = "Screen Effect turned off because screen recording stopped."
+        }
+        // The capture doesn't survive sleep or a locked screen, and a sleeping screen needs nothing
+        // held: it's off meanwhile and comes back on after.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.pause() }
+            }
+        }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.resume() }
+            }
+        }
+        let distributed = DistributedNotificationCenter.default()
+        distributed.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pause() }
+        }
+        distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.resume() }
+        }
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.screensChanged() }
         }
     }
 
-    /// ⌥⌘S turns holding the screen on and off from anywhere, even with nothing of Straight's in view.
+    /// ⌥⌘S turns holding the screen on and off from anywhere, even with nothing of MacBook Duo's in view,
+    /// unless it's been turned off in Settings. Called again whenever that changes.
     func installHotKey() {
+        guard UserDefaults.standard.bool(forKey: Defaults.globalShortcut) else {
+            hotKey = nil
+            return
+        }
         guard hotKey == nil else { return }
         hotKey = GlobalHotKey(keyCode: UInt32(kVK_ANSI_S), modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
             self?.toggle()
@@ -72,11 +103,23 @@ final class StillScreen {
     }
 
     func turnOn() {
-        guard window == nil, let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) ?? NSScreen.main,
+        guard window == nil else { return }
+        guard let screen = ThisMac.builtInScreen,
               let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
-        else { return }
+        else {
+            problem = "Open your MacBook's lid to use Screen Effect."
+            return
+        }
+        // Asking comes with an explanation first, never out of the blue.
+        guard ScreenRecordingPermission.shared.state != .notAsked else {
+            AppState.shared.showMainWindow(.screenPermission)
+            return
+        }
         problem = nil
         isOn = true
+        AppState.shared.follow()
+        // A picture held edge to edge would be held twice over.
+        EdgeToEdge.shared.exit()
 
         let view = CardMetalView(drawsItself: false)
         view.sensor = sensor
@@ -120,20 +163,12 @@ final class StillScreen {
                 return
             } catch {
                 turnOff()
-                problem = "Straight needs Screen Recording permission: allow it in System Settings, Privacy & "
-                    + "Security, then quit Straight and open it again."
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+                problem = "Screen Effect needs Screen Recording permission."
+                AppState.shared.showMainWindow(.screenPermission)
                 return
             }
             guard self.window === window else { return }
             if case .resting = phase { mirror.setRate(Self.restingRate) }
-            // Only the menu bar item, while it's on. Its own window can't become main, unlike Straight's
-            // window and its edge-to-edge one.
-            for other in NSApp.windows where other !== window && other.isVisible && other.canBecomeMain {
-                other.orderOut(nil)
-                hidden.append(other)
-            }
-            NSApp.setActivationPolicy(.accessory)
             while mirror.latest == nil, self.window === window {
                 try? await Task.sleep(for: .milliseconds(20))
             }
@@ -142,17 +177,15 @@ final class StillScreen {
                 try? await Task.sleep(for: .milliseconds(500))
                 if self.window === window, mirror.latest == nil {
                     turnOff()
-                    problem = "Screen sharing was stopped, so the screen isn't held anymore."
+                    problem = "Screen Effect turned off because screen recording stopped."
                 }
             }
         }
     }
 
     func turnOff() {
+        resumes = false
         guard window != nil else { return }
-        // Back first, so Straight still has a window open once this one goes, and doesn't quit.
-        for other in hidden { other.orderFront(nil) }
-        hidden = []
         link?.invalidate()
         link = nil
         ticker = nil
@@ -161,11 +194,43 @@ final class StillScreen {
         view = nil
         mirror.stop()
         isOn = false
-        NSApp.setActivationPolicy(.regular)
+        isHolding = false
+        AppState.shared.unfollow()
     }
 
-    /// The screen's picture over the whole display, for the viewpoint set in Straight's Viewer tab and
-    /// looking as set in its Look tab.
+    /// Off for now, to come back on by itself.
+    private func pause() {
+        guard isOn else { return }
+        turnOff()
+        resumes = true
+    }
+
+    private func resume() {
+        guard resumes else { return }
+        resumes = false
+        // The display takes a moment to be itself again after waking.
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            turnOn()
+        }
+    }
+
+    /// A display was added, removed or changed resolution: the capture and the window are sized for
+    /// the old one, so they start over, or stop if the built-in display went away.
+    private func screensChanged() {
+        guard isOn, let window else { return }
+        guard let screen = ThisMac.builtInScreen else {
+            turnOff()
+            problem = "Screen Effect turned off because your MacBook's display went off."
+            return
+        }
+        guard screen.frame != window.frame || screen.backingScaleFactor != window.backingScaleFactor else { return }
+        turnOff()
+        turnOn()
+    }
+
+    /// The screen's picture over the whole display, for the viewpoint set in the Viewer tab and looking
+    /// as set in the Look tab.
     private func scene(on screen: NSScreen) -> CardScene? {
         guard let placement = ScreenPlacement(of: screen.frame, on: screen) else { return nil }
         let defaults = UserDefaults.standard
@@ -179,8 +244,8 @@ final class StillScreen {
                          anchorAngle: sensor.angle,
                          viewpoint: defaults.string(forKey: "viewpoint").flatMap(Viewpoint.init) ?? .screen,
                          eyeDistance: setting("eyeDistance", 55), eyeHeight: setting("eyeHeight", 35),
-                         viewDistance: setting("viewDistance", 0), lookingDown: setting("viewLookingDown", 0),
-                         fillsWindow: true, cornerRadius: setting("cornerRadius", ControlPanel.defaultCornerRadius),
+                         viewDistance: setting("viewDistance", 0), lookingDown: setting("viewLookingDown", 10),
+                         fillsWindow: true, cornerRadius: setting("cornerRadius", LidGeometry.current.cornerRadius),
                          background: RGBColor(hex: 0), blur: blur, dim: dim, content: .nothing)
     }
 
@@ -226,6 +291,7 @@ final class StillScreen {
             view?.scene = scene(on: screen)
             window?.alphaValue = 1
             mirror.setRate(fullRate)
+            isHolding = true
         }
         phase = .holding(anchor: anchor)
         view?.scene?.anchorAngle = anchor
@@ -239,30 +305,7 @@ final class StillScreen {
         view?.scene?.anchorAngle = angle
         view?.scene?.content = .nothing
         mirror.setRate(Self.restingRate)
-    }
-}
-
-/// The menu bar item's menu.
-struct StillScreenMenu: View {
-    var still = StillScreen.shared
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Toggle("Hold the Screen Still", isOn: Binding(get: { still.isOn }, set: { _ in still.toggle() }))
-            .keyboardShortcut("s", modifiers: [.command, .option])
-        Text("While the lid moves, then back to normal")
-        Text("⌥⌘S turns it on and off from anywhere")
-        if let problem = still.problem {
-            Text(problem)
-        }
-        Divider()
-        Button("Open Straight") {
-            if still.isOn { still.turnOff() }
-            NSApp.activate()
-            openWindow(id: "main")
-        }
-        Button("Quit Straight") { NSApp.terminate(nil) }
-            .keyboardShortcut("q")
+        if isHolding { isHolding = false }
     }
 }
 
@@ -283,10 +326,15 @@ private final class GlobalHotKey {
             MainActor.assumeIsolated { hotKey.action() }
             return noErr
         }, 1, &pressed, me, &handler)
-        // 'STRT', for Straight.
-        let id = EventHotKeyID(signature: OSType(0x5354_5254), id: 1)
+        // 'MDUO', for MacBook Duo.
+        let id = EventHotKeyID(signature: OSType(0x4D44_554F), id: 1)
         guard installed == noErr,
               RegisterEventHotKey(keyCode, modifiers, id, GetApplicationEventTarget(), 0, &hotKey) == noErr
         else { return nil }
+    }
+
+    deinit {
+        if let hotKey { UnregisterEventHotKey(hotKey) }
+        if let handler { RemoveEventHandler(handler) }
     }
 }

@@ -9,7 +9,8 @@ using namespace metal;
 // the renderer makes progressively blurrier copies of that whole picture; `glassFinish` then blends,
 // for each pixel, the two copies nearest its blur. Blurring the picture of the screen rather than the
 // card is like frosted glass on the screen with the card seen through it: the blur doesn't foreshorten
-// with the card, and the card's outline blurs into what's around it.
+// with the card, and the card's outline blurs into what's around it. That picture runs past the
+// window on every side, so the blur near the window's edges takes in what's really beyond them.
 //
 // `values` is packed by CardFrame in CardRenderer.swift:
 //
@@ -213,12 +214,14 @@ static float outline(constant float *values, float2 uv) {
     return values[17] > 0.5 ? pixelCoverage(uv, card, values[14], values[11]) : cardCoverage(uv, card, values[14], 0.5);
 }
 
+/// `margin` is how far, in pixels, the window's top-left corner is into what's drawn.
 fragment float4 cardFragment(Rasterized in [[stage_in]], constant float *values [[buffer(0)]],
+                             constant float2 &margin [[buffer(1)]],
                              texture2d<half> atlas0 [[texture(0)]], texture2d<half> atlas1 [[texture(1)]],
                              texture2d<half> atlas2 [[texture(2)]], texture2d<half> atlas3 [[texture(3)]],
                              texture2d<half> atlas4 [[texture(4)]], texture2d<half> atlas5 [[texture(5)]]) {
     bool forGlass = values[35] > 0.5;
-    float2 point = in.position.xy / values[11];
+    float2 point = (in.position.xy - margin) / values[11];
     float3 background = float3(values[32], values[33], values[34]);
     // Past the card's horizon, the card's plane is behind the eye.
     float w = point.x * values[2] + point.y * values[5] + values[8];
@@ -260,14 +263,16 @@ fragment float4 cardFragment(Rasterized in [[stage_in]], constant float *values 
 
 /// The screen's picture `sharp` (with each pixel's share of the full blur as its alpha), blurred as
 /// much as each pixel asks by blending the two nearest of its progressively blurrier copies, which are
-/// blurred by the full blur times (level / 8)^2.
-fragment half4 glassFinish(Rasterized in [[stage_in]], texture2d<float> sharp [[texture(0)]],
+/// blurred by the full blur times (level / 8)^2. The window is the part of them `margin` pixels in from
+/// the top-left.
+fragment half4 glassFinish(Rasterized in [[stage_in]], constant float2 &margin [[buffer(0)]],
+                           texture2d<float> sharp [[texture(0)]],
                            texture2d<float> copy1 [[texture(1)]], texture2d<float> copy2 [[texture(2)]],
                            texture2d<float> copy3 [[texture(3)]], texture2d<float> copy4 [[texture(4)]],
                            texture2d<float> copy5 [[texture(5)]], texture2d<float> copy6 [[texture(6)]],
                            texture2d<float> copy7 [[texture(7)]], texture2d<float> copy8 [[texture(8)]]) {
     constexpr sampler smooth(coord::normalized, filter::linear, address::clamp_to_edge);
-    float2 at = in.position.xy;
+    float2 at = in.position.xy + margin;
     float2 uv = at / float2(sharp.get_width(), sharp.get_height());
     float4 center = sharp.read(uint2(at));
     // Copies are spaced by the square of their share of the full blur.
@@ -283,5 +288,5 @@ fragment half4 glassFinish(Rasterized in [[stage_in]], texture2d<float> sharp [[
     if (lower < 8 && between > 0.002) { color = mix(color, COPY(lower + 1), between); }
     #undef COPY
     // A little noise, under a step of 8-bit color, so slow dark fades don't band.
-    return half4(half3(color + (noise(at) - 0.5) / 255), 1);
+    return half4(half3(color + (noise(in.position.xy) - 0.5) / 255), 1);
 }

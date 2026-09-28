@@ -133,6 +133,13 @@ struct CardFrame {
     /// fade that hasn't come in yet blurs nothing.
     var blurs: Bool { values[18] != 0 && values[15] > 0 && (values[18] < 2 || values[20] > 0) }
 
+    /// The most any part of the card is blurred, as a share of the full blur: the card's strength, or
+    /// a layer's own if that's stronger.
+    var strongestBlur: Double {
+        let layers = (0..<Int(values[31])).map { values[52 + $0 * 48 + 4] }
+        return Double(min(max(layers.reduce(values[15], max), 0), 1))
+    }
+
     func isSame(as other: CardFrame?) -> Bool {
         guard let other, values == other.values, textures.count == other.textures.count else { return false }
         return zip(textures, other.textures).allSatisfy { $0 === $1 }
@@ -320,21 +327,21 @@ enum CardPasses {
         private var levels: [Int] = []
         fileprivate var blurs: [Int: MPSImageGaussianBlur] = [:]
 
-        /// The sharp picture the size of `target`, with mipmaps to shrink it from, and a texture for
-        /// each blurred copy at the mipmap level it's made from.
-        fileprivate func textures(like target: MTLTexture, levels: [Int]) -> (sharp: MTLTexture, copies: [MTLTexture])? {
-            if let sharp, sharp.width == target.width, sharp.height == target.height, levels == self.levels {
+        /// The sharp picture, `width` by `height` pixels, with mipmaps to shrink it from, and a texture
+        /// for each blurred copy at the mipmap level it's made from.
+        fileprivate func textures(width: Int, height: Int, levels: [Int]) -> (sharp: MTLTexture, copies: [MTLTexture])? {
+            if let sharp, sharp.width == width, sharp.height == height, levels == self.levels {
                 return (sharp, copies)
             }
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: target.width,
-                                                                      height: target.height, mipmapped: true)
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: width,
+                                                                      height: height, mipmapped: true)
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .private
             guard let made = GPU.device.makeTexture(descriptor: descriptor) else { return nil }
             copies = levels.compactMap { level in
                 let copy = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
-                                                                    width: max(target.width >> level, 1),
-                                                                    height: max(target.height >> level, 1), mipmapped: false)
+                                                                    width: max(width >> level, 1),
+                                                                    height: max(height >> level, 1), mipmapped: false)
                 copy.usage = [.shaderRead, .shaderWrite]
                 copy.storageMode = .private
                 return GPU.device.makeTexture(descriptor: copy)
@@ -377,9 +384,11 @@ enum CardPasses {
         }
         // Every slot gets a texture, even ones past the layers in use.
         let textures = frame.textures + Array(repeating: first, count: CardFrame.maxLayers - frame.textures.count)
-        func drawCard(_ encoder: MTLRenderCommandEncoder, _ pipeline: MTLRenderPipelineState) {
+        func drawCard(_ encoder: MTLRenderCommandEncoder, _ pipeline: MTLRenderPipelineState, margin: Int = 0) {
             encoder.setRenderPipelineState(pipeline)
             frame.values.withUnsafeBytes { encoder.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
+            var offset = SIMD2<Float>(repeating: Float(margin))
+            encoder.setFragmentBytes(&offset, length: MemoryLayout.size(ofValue: offset), index: 1)
             encoder.setFragmentTextures(textures, range: 0..<CardFrame.maxLayers)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
@@ -393,13 +402,24 @@ enum CardPasses {
             let points = sigma / pixelsPerPoint
             return points < 2 ? 0 : points < 6 ? 1 : points < 12 ? 2 : 3
         }
-        guard frame.blurs, let sharp, let finish, let scratched = scratch.textures(like: target, levels: levels) else {
+        // Past the window's edges the blur needs what's really there: the card carrying on, or the
+        // background around it. Blurring just the window would stretch its edge pixels outward, and
+        // anything crossing an edge, like the checkerboard's white border, would flare into a band
+        // that flashes as it passes. So the sharp picture runs past the window all round, by three
+        // times the widest blur in use, beyond which nothing shows through; and it's a multiple of 8
+        // each way, so every shrunk copy lines up with it exactly.
+        func multipleOf8(_ n: Int) -> Int { (n + 7) / 8 * 8 }
+        let margin = multipleOf8(Int((3 * full * frame.strongestBlur).rounded(.up)))
+        guard frame.blurs, let sharp, let finish,
+              let scratched = scratch.textures(width: multipleOf8(target.width + 2 * margin),
+                                               height: multipleOf8(target.height + 2 * margin), levels: levels)
+        else {
             frame.values[35] = 0
             pass(into: target) { drawCard($0, direct) }
             return
         }
         frame.values[35] = 1
-        pass(into: scratched.sharp) { drawCard($0, sharp) }
+        pass(into: scratched.sharp) { drawCard($0, sharp, margin: margin) }
         if let blit = commands.makeBlitCommandEncoder() {
             blit.generateMipmaps(for: scratched.sharp)
             blit.endEncoding()
@@ -414,6 +434,8 @@ enum CardPasses {
         }
         pass(into: target) { encoder in
             encoder.setRenderPipelineState(finish)
+            var offset = SIMD2<Float>(repeating: Float(margin))
+            encoder.setFragmentBytes(&offset, length: MemoryLayout.size(ofValue: offset), index: 0)
             encoder.setFragmentTexture(scratched.sharp, index: 0)
             encoder.setFragmentTextures(scratched.copies, range: 1..<1 + scratched.copies.count)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)

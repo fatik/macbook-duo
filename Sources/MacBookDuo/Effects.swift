@@ -23,9 +23,9 @@ enum LidDirection: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .opening: "Opened more"
-        case .closing: "Closed more"
-        case .either: "Moved either way"
+        case .opening: "Opening"
+        case .closing: "Closing"
+        case .either: "Either way"
         }
     }
 

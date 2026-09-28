@@ -8,8 +8,8 @@ enum Viewpoint: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .screen: "From the screen"
-        case .eyes: "Your eyes"
+        case .screen: "Typical"
+        case .eyes: "Calibrated"
         }
     }
 }
@@ -26,11 +26,10 @@ struct Rig {
     var placement: ScreenPlacement
 
     /// Distance up the lid from the hinge's axis to the bottom edge of the lit display area, and how
-    /// far the display's glass lies behind the axis, away from the viewer: the lid's lower end swings
-    /// down behind the base, around an axis inside it. Measured from Apple's dimension drawing of the
-    /// 13-inch M4 MacBook Air, to about a millimeter.
-    static let hingeToDisplay = 1.66
-    static let glassBehindHinge = 0.4
+    /// far the display's glass lies behind the axis, away from the viewer: this Mac's (see
+    /// `LidGeometry`).
+    static var hingeToDisplay: Double { LidGeometry.current.hingeToDisplay }
+    static var glassBehindHinge: Double { LidGeometry.current.glassBehindHinge }
 
     var eye: SIMD3<Double> { [0, eyeHeight, eyeDistance] }
 

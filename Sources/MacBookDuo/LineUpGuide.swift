@@ -83,16 +83,15 @@ struct LineUpGuide: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Does the circle look round and the squares square, like a card standing still in front of you? "
-                     + "If it looks stretched or leaning, adjust:")
+                Text("Adjust until the circle looks round and the squares look square.")
                     .font(.system(size: 12.5))
                     .foregroundStyle(.primary.opacity(0.85))
                     .fixedSize(horizontal: false, vertical: true)
-                NudgeRow(title: "Lean", value: Binding(get: { lineUp.lean }, set: { lineUp.lean = $0 }), in: -15...15,
-                         low: "Toward you", high: "Away",
+                NudgeRow(title: "Lean", value: Binding(get: { lineUp.lean }, set: { lineUp.lean = $0 }),
+                         reach: EyeLineUp.reach.lean, low: "Toward you", high: "Away",
                          shown: lineUp.lean.formatted(.number.precision(.fractionLength(1))) + "°")
-                NudgeRow(title: "Height", value: Binding(get: { lineUp.lift }, set: { lineUp.lift = $0 }), in: -15...15,
-                         low: "Lower", high: "Higher",
+                NudgeRow(title: "Height", value: Binding(get: { lineUp.lift }, set: { lineUp.lift = $0 }),
+                         reach: EyeLineUp.reach.lift, low: "Lower", high: "Higher",
                          shown: lineUp.lift.formatted(.number.precision(.fractionLength(1))) + " cm")
             }
             .padding(12)
@@ -115,22 +114,25 @@ struct LineUpGuide: View {
 
             HStack(spacing: 8) {
                 Button("Cancel", action: cancel)
+                    .buttonStyle(.secondary)
                 Spacer()
                 if lineUp.lean != 0 || lineUp.lift != 0 {
                     Button("Reset") {
                         lineUp.lean = 0
                         lineUp.lift = 0
                     }
+                    .buttonStyle(.secondary)
                 }
                 if lineUp.isComplete {
                     Button("Save Another", action: save)
+                        .buttonStyle(.secondary)
                         .disabled(!canSave)
                     Button("Done", action: finish)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.primary)
                         .keyboardShortcut(.defaultAction)
                 } else {
-                    Button("Looks Right", action: save)
-                        .buttonStyle(.borderedProminent)
+                    Button("Looks Good", action: save)
+                        .buttonStyle(.primary)
                         .keyboardShortcut(.defaultAction)
                         .disabled(!canSave)
                 }
@@ -162,11 +164,11 @@ struct LineUpGuide: View {
         guard let lidAngle else { return (" ", false) }
         guard let target = lineUp.target else {
             return lineUp.isNew(lidAngle)
-                ? ("Line up another angle, or you're done", true)
+                ? ("Add another angle, or finish", true)
                 : ("Move the lid to another angle", false)
         }
         let away = target - lidAngle
-        if abs(away) <= EyeLineUp.tolerance { return ("That's enough — hold the lid here", true) }
+        if abs(away) <= EyeLineUp.tolerance { return ("That's it. Leave the lid here.", true) }
         let degrees = Int(abs(away).rounded())
         return (away < 0 ? "Close the lid \(degrees)° more" : "Open the lid \(degrees)° more", false)
     }
@@ -182,22 +184,31 @@ struct LineUpGuide: View {
     }
 }
 
-/// A nudge slider with what each end does, and its value.
+/// A nudge slider with what each end does, and its value. It moves the value slowly near the middle
+/// and faster toward the ends, so the small nudges that finish a line-up stay as fine as ever while
+/// the large ones a far-off starting eye needs are still in reach.
 private struct NudgeRow: View {
     var title: String
     @Binding var value: Double
-    var range: ClosedRange<Double>
+    /// How far the value goes either way.
+    var reach: Double
     var low: String
     var high: String
     var shown: String
 
-    init(title: String, value: Binding<Double>, in range: ClosedRange<Double>, low: String, high: String, shown: String) {
+    init(title: String, value: Binding<Double>, reach: Double, low: String, high: String, shown: String) {
         self.title = title
         _value = value
-        self.range = range
+        self.reach = reach
         self.low = low
         self.high = high
         self.shown = shown
+    }
+
+    /// Where the slider sits, from -1 to 1: the value grows with its square.
+    private var position: Binding<Double> {
+        Binding(get: { (abs(value) / reach).squareRoot() * (value < 0 ? -1 : 1) },
+                set: { value = $0 * abs($0) * reach })
     }
 
     var body: some View {
@@ -209,7 +220,7 @@ private struct NudgeRow: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .frame(width: 66, alignment: .trailing)
-            Slider(value: $value, in: range)
+            Slider(value: position, in: -1...1)
                 .controlSize(.small)
             Text(high)
                 .font(.system(size: 11))
