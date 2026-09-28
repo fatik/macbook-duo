@@ -1,12 +1,13 @@
 import AppKit
 import Metal
+import MetalPerformanceShaders
 import QuartzCore
 import SwiftUI
 
-/// One picture drawn on the card: its blurred copies, where it sits, and how it mixes with the
+/// One picture drawn on the card: its texture, where it sits, and how it mixes with the
 /// layers behind it.
 struct CardLayer {
-    var atlas: BlurAtlas
+    var atlas: PictureTexture
     /// Where the picture sits on the card, in fractions of the card's size.
     var rect: CGRect
     /// How strongly it blurs where the blur is full.
@@ -25,6 +26,20 @@ struct CardLayer {
     }
 }
 
+/// Where the eye is and what it's focused on, for working out how out of focus each part of the card
+/// is: all in the world, in centimeters, measured from a point on the screen's glass.
+struct FocusGeometry {
+    var eye: SIMD3<Double>
+    /// The card's top-left corner, and the way to its top-right and bottom-left corners.
+    var corner: SIMD3<Double>
+    var across: SIMD3<Double>
+    var down: SIMD3<Double>
+    /// The plane the eye is focused on, the glass, runs through that point, facing this way.
+    var focusNormal: SIMD3<Double>
+    /// The viewing distance the depth effects' "full at" distances are measured at.
+    var reference: Double
+}
+
 /// Everything the shader needs for one frame, packed in the order `CardScene.metal` reads it.
 struct CardFrame {
     var values: [Float]
@@ -35,14 +50,14 @@ struct CardFrame {
     /// `toWindow` takes a card position (0 to 1 across it) to the window, in points.
     init?(toWindow: ProjectionTransform, windowSize: CGSize, cardSize: CGSize, cornerRadius: Double,
           blurStrength: Double, blur: EffectShape, dimStrength: Double, dim: EffectShape,
-          background: RGBColor, layers: [CardLayer]) {
+          focus: FocusGeometry, background: RGBColor, layers: [CardLayer]) {
         guard var toCard = toWindow.inverted() else { return nil }
         // Keep the card's own side of its horizon positive.
         let middle = CGPoint(x: 0.5, y: 0.5).applying(toWindow)
         if middle.x * toCard.m13 + middle.y * toCard.m23 + toCard.m33 < 0 { toCard = toCard.negated() }
 
         let layers = layers.prefix(Self.maxLayers)
-        var values = [Float](repeating: 0, count: 36)
+        var values = [Float](repeating: 0, count: 52)
         for (index, m) in [toCard.m11, toCard.m12, toCard.m13, toCard.m21, toCard.m22, toCard.m23,
                            toCard.m31, toCard.m32, toCard.m33].enumerated() {
             values[index] = Float(m)
@@ -64,10 +79,8 @@ struct CardFrame {
             switch shape {
             case .none:
                 values[slot] = 0
-            case .depth(let top, let bottom, let full, let side):
+            case .depth(let full, let side):
                 values[slot] = 1
-                values[16] = Float(top)
-                values[17] = Float(bottom)
                 values[slot + 4] = Float(max(full, 0.0001))
                 values[slot + 5] = switch side {
                 case .nearer: -1
@@ -77,7 +90,7 @@ struct CardFrame {
             case .cardEdge(let edge, let ramp):
                 values[slot] = 2
                 setEdge(edge, ramp)
-            case .windowEdge(let edge, let ramp):
+            case .partInViewEdge(let edge, let ramp):
                 values[slot] = 3
                 setEdge(edge, ramp)
             }
@@ -89,6 +102,12 @@ struct CardFrame {
         values[32] = Float(background.red)
         values[33] = Float(background.green)
         values[34] = Float(background.blue)
+        for (index, v) in [focus.eye, focus.corner, focus.across, focus.down, focus.focusNormal].enumerated() {
+            values[36 + index * 3] = Float(v.x)
+            values[37 + index * 3] = Float(v.y)
+            values[38 + index * 3] = Float(v.z)
+        }
+        values[51] = Float(focus.reference)
 
         for layer in layers {
             var packed = [Float](repeating: 0, count: 48)
@@ -100,18 +119,19 @@ struct CardFrame {
             packed[4] = Float(layer.blur)
             packed[5] = Float(layer.opacity)
             packed[6] = Float(ClockBlend.allCases.firstIndex(of: layer.blend) ?? 0)
-            packed[7] = Float(BlurAtlas.levels)
             packed[8] = Float(layer.atlas.pixelSize.width)
             packed[9] = Float(layer.atlas.pixelSize.height)
-            for (index, tile) in layer.atlas.tiles.prefix(BlurAtlas.levels + 1).enumerated() {
-                packed.replaceSubrange(10 + index * 4 ..< 14 + index * 4,
-                                       with: [Float(tile.minX), Float(tile.minY), Float(tile.width), Float(tile.height)])
-            }
+            let tile = layer.atlas.tiles[0]
+            packed.replaceSubrange(10..<14, with: [Float(tile.minX), Float(tile.minY), Float(tile.width), Float(tile.height)])
             values += packed
         }
         self.values = values
         textures = layers.map(\.atlas.texture)
     }
+
+    /// Whether anything is blurred, so the picture of the screen needs its blurred copies. An edge
+    /// fade that hasn't come in yet blurs nothing.
+    var blurs: Bool { values[18] != 0 && values[15] > 0 && (values[18] < 2 || values[20] > 0) }
 
     func isSame(as other: CardFrame?) -> Bool {
         guard let other, values == other.values, textures.count == other.textures.count else { return false }
@@ -185,18 +205,27 @@ final class CardMetalView: NSView {
     private var drawnSize: CGSize = .zero
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
 
-    private static let queue = GPU.device.makeCommandQueue()
-    private static let pipeline: MTLRenderPipelineState? = {
-        guard let library = try? GPU.device.makeDefaultLibrary(bundle: .main) else { return nil }
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = library.makeFunction(name: "cardVertex")
-        descriptor.fragmentFunction = library.makeFunction(name: "cardFragment")
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        return try? GPU.device.makeRenderPipelineState(descriptor: descriptor)
-    }()
+    /// Whether what's behind the window shows through, rather than the background, while there's no
+    /// card to draw.
+    var seeThroughWhenEmpty = false {
+        didSet { metalLayer.isOpaque = !seeThroughWhenEmpty }
+    }
+    /// The color space the drawn colors are in.
+    var colorSpace: CGColorSpace? {
+        get { metalLayer.colorspace }
+        set { metalLayer.colorspace = newValue }
+    }
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
+    /// Whether it draws on its own display link while its window is visible. If not, its owner calls
+    /// `update(at:)` on every screen refresh instead.
+    private let drawsItself: Bool
+
+    private static let queue = GPU.device.makeCommandQueue()
+    private let scratch = CardPasses.Scratch()
+
+    init(drawsItself: Bool = true) {
+        self.drawsItself = drawsItself
+        super.init(frame: .zero)
         wantsLayer = true
         layerContentsRedrawPolicy = .never
     }
@@ -213,7 +242,7 @@ final class CardMetalView: NSView {
         return layer
     }
 
-    override var isOpaque: Bool { true }
+    override var isOpaque: Bool { !seeThroughWhenEmpty }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func viewDidMoveToWindow() {
@@ -221,15 +250,21 @@ final class CardMetalView: NSView {
         // The display link holds on to its target, so it only runs while the view is in a window.
         link?.invalidate()
         link = nil
-        guard window != nil else { return }
+        guard window != nil, drawsItself else { return }
         let link = displayLink(target: self, selector: #selector(step(_:)))
         link.add(to: .main, forMode: .common)
         self.link = link
     }
 
     @objc private func step(_ link: CADisplayLink) {
-        guard let sensor, let scene, let window, window.occlusionState.contains(.visible) else { return }
-        sensor.advance(to: link.timestamp)
+        guard let window, window.occlusionState.contains(.visible) else { return }
+        update(at: link.timestamp)
+    }
+
+    /// Draws the scene for the screen refresh at `timestamp`, if anything changed since it last drew.
+    func update(at timestamp: CFTimeInterval) {
+        guard let sensor, let scene, let window else { return }
+        sensor.advance(to: timestamp)
 
         let scale = window.backingScaleFactor
         let size = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
@@ -251,24 +286,137 @@ final class CardMetalView: NSView {
 
     private func draw(_ frame: CardFrame?, background: RGBColor) -> Bool {
         guard let drawable = metalLayer.nextDrawable(), let commands = Self.queue?.makeCommandBuffer() else { return false }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = drawable.texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: background.red, green: background.green,
-                                                            blue: background.blue, alpha: 1)
-        pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return false }
-        if let frame, let pipeline = Self.pipeline, let first = frame.textures.first {
-            encoder.setRenderPipelineState(pipeline)
-            frame.values.withUnsafeBytes { encoder.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
-            // Every slot gets a texture, even ones past the layers in use.
-            let textures = frame.textures + Array(repeating: first, count: CardFrame.maxLayers - frame.textures.count)
-            encoder.setFragmentTextures(textures, range: 0..<CardFrame.maxLayers)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        }
-        encoder.endEncoding()
+        CardPasses.encode(frame, background: background, seeThrough: seeThroughWhenEmpty, into: drawable.texture,
+                          commands: commands, scratch: scratch)
         commands.present(drawable)
         commands.commit()
         return true
+    }
+}
+
+/// Draws a frame with the card's shaders into a texture: in one pass, or with blur by drawing the
+/// screen's picture sharp, making progressively blurrier copies of it, and blending those.
+enum CardPasses {
+    /// How many blurred copies there are, each blurred by the full blur times (level / copies)^2.
+    static let copies = 8
+
+    private static let library = try? GPU.device.makeDefaultLibrary(bundle: .main)
+    private static func pipeline(_ fragment: String, _ format: MTLPixelFormat) -> MTLRenderPipelineState? {
+        guard let library else { return nil }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = library.makeFunction(name: "cardVertex")
+        descriptor.fragmentFunction = library.makeFunction(name: fragment)
+        descriptor.colorAttachments[0].pixelFormat = format
+        return try? GPU.device.makeRenderPipelineState(descriptor: descriptor)
+    }
+    private static let direct = pipeline("cardFragment", .bgra8Unorm)
+    private static let sharp = pipeline("cardFragment", .rgba16Float)
+    private static let finish = pipeline("glassFinish", .bgra8Unorm)
+
+    /// The screen's picture and its blurred copies, kept from frame to frame.
+    final class Scratch {
+        fileprivate var sharp: MTLTexture?
+        fileprivate var copies: [MTLTexture] = []
+        private var levels: [Int] = []
+        fileprivate var blurs: [Int: MPSImageGaussianBlur] = [:]
+
+        /// The sharp picture the size of `target`, with mipmaps to shrink it from, and a texture for
+        /// each blurred copy at the mipmap level it's made from.
+        fileprivate func textures(like target: MTLTexture, levels: [Int]) -> (sharp: MTLTexture, copies: [MTLTexture])? {
+            if let sharp, sharp.width == target.width, sharp.height == target.height, levels == self.levels {
+                return (sharp, copies)
+            }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: target.width,
+                                                                      height: target.height, mipmapped: true)
+            descriptor.usage = [.renderTarget, .shaderRead]
+            descriptor.storageMode = .private
+            guard let made = GPU.device.makeTexture(descriptor: descriptor) else { return nil }
+            copies = levels.compactMap { level in
+                let copy = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
+                                                                    width: max(target.width >> level, 1),
+                                                                    height: max(target.height >> level, 1), mipmapped: false)
+                copy.usage = [.shaderRead, .shaderWrite]
+                copy.storageMode = .private
+                return GPU.device.makeTexture(descriptor: copy)
+            }
+            sharp = made
+            self.levels = levels
+            guard copies.count == levels.count else { return nil }
+            return (made, copies)
+        }
+
+        /// A Gaussian blur of `sigma` pixels, kept for reuse.
+        fileprivate func blur(sigma: Double) -> MPSImageGaussianBlur {
+            let key = Int((sigma * 100).rounded())
+            if let known = blurs[key] { return known }
+            let made = MPSImageGaussianBlur(device: GPU.device, sigma: Float(max(sigma, 0.01)))
+            made.edgeMode = .clamp
+            blurs[key] = made
+            return made
+        }
+    }
+
+    /// Draws `frame` into `target` (bgra8Unorm), or just the background without one: or nothing at
+    /// all, clear, if it's `seeThrough`.
+    static func encode(_ frame: CardFrame?, background: RGBColor, seeThrough: Bool = false, into target: MTLTexture,
+                       commands: MTLCommandBuffer, scratch: Scratch) {
+        func pass(into texture: MTLTexture, _ draw: (MTLRenderCommandEncoder) -> Void) {
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = texture
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].clearColor = MTLClearColor(red: background.red, green: background.green,
+                                                                blue: background.blue, alpha: seeThrough ? 0 : 1)
+            pass.colorAttachments[0].storeAction = .store
+            guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
+            draw(encoder)
+            encoder.endEncoding()
+        }
+        guard var frame, let first = frame.textures.first, let direct else {
+            pass(into: target) { _ in }
+            return
+        }
+        // Every slot gets a texture, even ones past the layers in use.
+        let textures = frame.textures + Array(repeating: first, count: CardFrame.maxLayers - frame.textures.count)
+        func drawCard(_ encoder: MTLRenderCommandEncoder, _ pipeline: MTLRenderPipelineState) {
+            encoder.setRenderPipelineState(pipeline)
+            frame.values.withUnsafeBytes { encoder.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
+            encoder.setFragmentTextures(textures, range: 0..<CardFrame.maxLayers)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+
+        // The full blur is an eighth of the card's shorter side, in pixels. Each copy is made from the
+        // picture shrunk as far as its blur still spans a few pixels, which blur hides anyway.
+        let pixelsPerPoint = Double(frame.values[11])
+        let full = Double(min(frame.values[12], frame.values[13])) / 8 * pixelsPerPoint
+        let sigmas = (1...copies).map { full * pow(Double($0) / Double(copies), 2) }
+        let levels = sigmas.map { sigma -> Int in
+            let points = sigma / pixelsPerPoint
+            return points < 2 ? 0 : points < 6 ? 1 : points < 12 ? 2 : 3
+        }
+        guard frame.blurs, let sharp, let finish, let scratched = scratch.textures(like: target, levels: levels) else {
+            frame.values[35] = 0
+            pass(into: target) { drawCard($0, direct) }
+            return
+        }
+        frame.values[35] = 1
+        pass(into: scratched.sharp) { drawCard($0, sharp) }
+        if let blit = commands.makeBlitCommandEncoder() {
+            blit.generateMipmaps(for: scratched.sharp)
+            blit.endEncoding()
+        }
+        for (index, copy) in scratched.copies.enumerated() {
+            let level = levels[index]
+            guard let shrunk = scratched.sharp.makeTextureView(pixelFormat: .rgba16Float, textureType: .type2D,
+                                                               levels: level..<level + 1, slices: 0..<1)
+            else { continue }
+            scratch.blur(sigma: sigmas[index] / Double(1 << level))
+                .encode(commandBuffer: commands, sourceTexture: shrunk, destinationTexture: copy)
+        }
+        pass(into: target) { encoder in
+            encoder.setRenderPipelineState(finish)
+            encoder.setFragmentTexture(scratched.sharp, index: 0)
+            encoder.setFragmentTextures(scratched.copies, range: 1..<1 + scratched.copies.count)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
     }
 }

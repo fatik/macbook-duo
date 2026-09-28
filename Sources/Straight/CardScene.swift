@@ -1,4 +1,5 @@
 import SwiftUI
+import simd
 
 /// How the card is set up, everything but the lid angle, so each frame can be worked out from the
 /// angle alone, away from SwiftUI.
@@ -7,9 +8,6 @@ struct CardScene {
     /// The window's size in points.
     var windowSize: CGSize
     var cardSize: CGSize
-    var mode: CardMode
-    /// Whether the card's bottom edge stays on the screen's while it leans.
-    var pinnedAtBottom: Bool
     /// The lid angle the card was put in place at, or nil to use the current one.
     var anchorAngle: Double?
     var viewpoint: Viewpoint
@@ -18,7 +16,6 @@ struct CardScene {
     /// 0 means the default for the screen.
     var viewDistance: Double
     var lookingDown: Double
-    var sensitivity: Double
     var fillsWindow: Bool
     /// The card's corner radius in millimeters.
     var cornerRadius: Double
@@ -33,14 +30,16 @@ struct CardScene {
     enum Content {
         case nothing
         /// A single picture; `crops` trims its middle to the card's shape.
-        case picture(BlurAtlas, crops: Bool)
-        /// A layered scene, with its layers' copies in the same order.
-        case layers(ParallaxScene, [BlurAtlas], clock: Clock?, parallax: Parallax)
+        case picture(PictureTexture, crops: Bool)
+        /// The screen itself, as it looks right now.
+        case live(ScreenMirror)
+        /// A layered scene, with its layers' textures in the same order.
+        case layers(ParallaxScene, [PictureTexture], clock: Clock?, parallax: Parallax)
     }
 
     /// The date and time drawn between a scene's layers.
     struct Clock {
-        var atlas: BlurAtlas
+        var atlas: PictureTexture
         /// How much it comes closer with the parallax, from 0 (stays put) to 1 (like the nearest layer).
         var depth: Double
         var blur: Double
@@ -63,8 +62,7 @@ struct CardScene {
                                   distance: viewDistance > 0 ? viewDistance : Rig.defaultViewingDistance(for: placement),
                                   lookingDown: lookingDown)
             : (distance: eyeDistance, height: eyeHeight)
-        // Sensitivity scales how much the lid's movement since the anchor counts.
-        var modelled = anchor + sensitivity * (lidAngle - anchor)
+        var modelled = lidAngle
         var eyeHeight = eye.height
         if let adjustment {
             // Leaning the card back is drawing it for a lid a little further closed. Drawing it from a
@@ -79,23 +77,33 @@ struct CardScene {
 
     func pose(lidAngle: Double) -> CardPose? {
         let (rig, anchor) = rig(lidAngle: lidAngle)
-        return rig.cardPose(frame: cardFrame, mode: mode, anchorAngle: anchor, pinnedAtBottom: pinnedAtBottom)
+        return pose(rig, anchor: anchor)
+    }
+
+    private func pose(_ rig: Rig, anchor: Double) -> CardPose? {
+        rig.cardPose(frame: cardFrame, anchorAngle: anchor)
     }
 
     /// What to draw at this lid angle, or nil for nothing: the lid too far closed to draw the card
     /// sensibly, or its pictures not ready yet.
     func frame(lidAngle: Double) -> CardFrame? {
         let (rig, anchor) = rig(lidAngle: lidAngle)
-        guard let pose = rig.cardPose(frame: cardFrame, mode: mode, anchorAngle: anchor, pinnedAtBottom: pinnedAtBottom)
+        guard let pose = pose(rig, anchor: anchor)
         else { return nil }
         let corners = pose.corners.map { CGPoint(x: $0.x - placement.frame.minX, y: $0.y - placement.frame.minY) }
         guard let toWindow = ProjectionTransform(mapping: CGSize(width: 1, height: 1), to: corners) else { return nil }
 
         let cardAspect = cardSize.width / cardSize.height
         var layers: [CardLayer] = []
+        // A live screen's frames can come in the same texture, so each one is told apart by its count.
+        var liveFrame: Int?
         switch content {
         case .nothing:
             return nil
+        case .live(let mirror):
+            guard let latest = mirror.latest else { return nil }
+            layers = [CardLayer(atlas: latest.picture, rect: CGRect(x: 0, y: 0, width: 1, height: 1), blur: blur.strength)]
+            liveFrame = latest.count
         case .picture(let atlas, let crops):
             let rect = crops ? CardLayer.filling(aspect: atlas.aspect, cardAspect: cardAspect)
                              : CGRect(x: 0, y: 0, width: 1, height: 1)
@@ -117,24 +125,41 @@ struct CardScene {
             }
         }
 
-        // Filling the window pushes the card's own edges off-screen as the lid moves, so edge fades
-        // come in from the window's edges instead.
-        return CardFrame(toWindow: toWindow, windowSize: windowSize, cardSize: cardSize,
-                         cornerRadius: cornerRadius / 10 / placement.cmPerPoint,
-                         blurStrength: blur.strength,
-                         blur: blur.shape(lidAngle: lidAngle, anchorAngle: anchor, pose: pose, fromWindow: fillsWindow),
-                         dimStrength: dim.strength,
-                         dim: dim.shape(lidAngle: lidAngle, anchorAngle: anchor, pose: pose, fromWindow: fillsWindow),
-                         background: background, layers: layers)
+        // Filling the window, the card's edges move off-screen as the lid moves one way and into the
+        // window the other, so edge fades come in from the edges of whatever part of it is in view.
+        // Depth effects are measured at the distance the screen's middle was from the eye when the
+        // card was anchored.
+        var anchorRig = rig
+        anchorRig.lidAngle = anchor
+        let middle = anchorRig.world(fromDisplay: CGPoint(x: placement.frame.minX + windowSize.width / 2,
+                                                          y: placement.frame.minY + windowSize.height / 2))
+        // Measured from the point on the glass nearest the hinge's axis, so the plane in focus runs
+        // through where the positions start.
+        let onGlass = -Rig.glassBehindHinge * pose.focusNormal
+        let focus = FocusGeometry(eye: rig.eye - onGlass, corner: pose.world[0] - onGlass,
+                                  across: pose.world[1] - pose.world[0], down: pose.world[3] - pose.world[0],
+                                  focusNormal: pose.focusNormal, reference: simd_length(middle - rig.eye))
+        var frame = CardFrame(toWindow: toWindow, windowSize: windowSize, cardSize: cardSize,
+                              cornerRadius: cornerRadius / 10 / placement.cmPerPoint,
+                              blurStrength: blur.strength,
+                              blur: blur.shape(lidAngle: lidAngle, anchorAngle: anchor, fromPartInView: fillsWindow),
+                              dimStrength: dim.strength,
+                              dim: dim.shape(lidAngle: lidAngle, anchorAngle: anchor, fromPartInView: fillsWindow),
+                              focus: focus, background: background, layers: layers)
+        if let liveFrame {
+            frame?.values[16] = Float(liveFrame % 1_000_000)
+            // Drawn back exactly over itself, the screen's edges must cover the edge pixels fully.
+            frame?.values[17] = 1
+        }
+        return frame
     }
 
     /// A few words on where the card is at this lid angle.
     func summary(lidAngle: Double) -> String {
         guard placement.isBuiltIn else { return "Move to the built-in display" }
-        guard mode != .flat else { return "Flat on the screen" }
         let (rig, anchor) = rig(lidAngle: lidAngle)
         if adjustment != nil { return "Lining up · moved \(Int(abs(lidAngle - anchor).rounded()))°" }
-        guard let pose = rig.cardPose(frame: cardFrame, mode: mode, anchorAngle: anchor, pinnedAtBottom: pinnedAtBottom)
+        guard let pose = pose(rig, anchor: anchor)
         else { return "Too far closed to draw" }
         let held = "Held at \(Int(anchor.rounded()))°"
         guard pose.boundingBox.intersects(placement.frame) else { return "\(held) · out of view" }

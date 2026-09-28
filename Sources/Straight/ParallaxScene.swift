@@ -223,7 +223,7 @@ struct ClockRequest: Equatable {
     var aspect: Double
 }
 
-/// What a scene's layers are made into, so the copies are only remade when this changes.
+/// What a scene's layers are made into, so their textures are only remade when this changes.
 struct SceneAtlasRequest: Equatable {
     var scene: String
     var longSide: Double

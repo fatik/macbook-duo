@@ -164,7 +164,7 @@ private final class SensorPoller: @unchecked Sendable {
 }
 
 /// Receives screen refreshes. CADisplayLink needs an Objective-C target to call.
-private final class FrameTicker: NSObject {
+final class FrameTicker: NSObject {
     private let onFrame: (CADisplayLink) -> Void
 
     init(_ onFrame: @escaping (CADisplayLink) -> Void) {

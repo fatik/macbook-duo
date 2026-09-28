@@ -112,34 +112,38 @@ struct Effect {
 
     var fullDepth: Double { min(spread, 1) * StoredEffect.fullDepthAtMost }
 
-    /// Where the effect is at this lid angle, for a card drawn as `pose`.
+    /// Where the effect is at this lid angle.
     ///
     /// An edge fade keeps the same length (`spread`) and slides in from the edge as the lid moves, so
     /// a little movement gives a faint trace and more a stronger, deeper one. A depth effect follows
-    /// how far each part of the card is from the screen instead, which the lid changes by itself.
-    /// `fromWindow` makes an edge fade come in from the window's edge instead of the card's, for a
-    /// card filling the window whose own edges move off-screen.
-    func shape(lidAngle: Double, anchorAngle: Double, pose: CardPose, fromWindow: Bool) -> EffectShape {
+    /// how out of focus each part of the card is instead, which the lid changes by itself.
+    /// `fromPartInView` makes an edge fade come in from the edge of the part of the card in view: the
+    /// card's own edge while it's in the window, the window's once the card runs past it. That's for a
+    /// card filling the window, whose edges move off-screen as the lid moves one way and into the
+    /// window the other.
+    func shape(lidAngle: Double, anchorAngle: Double, fromPartInView: Bool) -> EffectShape {
         guard strength > 0 else { return .none }
         if edge == .depth {
-            return .depth(top: pose.depthAtTop, bottom: pose.depthAtBottom, full: fullDepth, side: depthSide)
+            return .depth(full: fullDepth, side: depthSide)
         }
         let travel = lidDirection.travel(from: anchorAngle, to: lidAngle, full: StoredEffect.fullReachAfter)
         let ramp = EffectRamp(front: spread * (1 - lidReaction * (1 - travel)), width: spread)
-        return fromWindow ? .windowEdge(edge, ramp) : .cardEdge(edge, ramp)
+        return fromPartInView ? .partInViewEdge(edge, ramp) : .cardEdge(edge, ramp)
     }
 }
 
 /// Where a blur or dimming is for one frame.
 enum EffectShape {
     case none
-    /// Grows with how much farther away (or nearer) than the in-focus surface each part of the card
-    /// is; `top` and `bottom` are those distances at the card's top and bottom edges.
-    case depth(top: Double, bottom: Double, full: Double, side: DepthSide)
+    /// Grows with how out of focus each part of the card is, seen from the eye focused on the screen:
+    /// full once it's `full` centimeters farther away (or nearer) than the screen, at the viewing
+    /// distance.
+    case depth(full: Double, side: DepthSide)
     /// Fades in from an edge of the card.
     case cardEdge(EffectEdge, EffectRamp)
-    /// Fades in from an edge of the window.
-    case windowEdge(EffectEdge, EffectRamp)
+    /// Fades in from an edge of the part of the card in view: the card's own edge where it's in the
+    /// window, the window's where the card runs past it.
+    case partInViewEdge(EffectEdge, EffectRamp)
 }
 
 /// How far an edge fade reaches, as fractions of the way across: none past `front`, easing up to

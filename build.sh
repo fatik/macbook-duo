@@ -31,7 +31,11 @@ build_app() {
         xcrun metallib "${airs[@]}" -o "$app/Contents/Resources/default.metallib"
         rm -f "${airs[@]}"
     fi
-    codesign --force --sign - "$app"
+    # Signed with a development certificate if there is one, so permissions like Screen Recording
+    # outlast a rebuild; otherwise ad hoc.
+    local identity
+    identity=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/ { print $2; exit }')
+    codesign --force --sign "${identity:--}" "$app"
     echo "Built $app"
 
     mkdir -p "$HOME/Applications"

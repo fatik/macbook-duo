@@ -1,28 +1,6 @@
 import SwiftUI
 import simd
 
-/// How the card should appear to be held in space.
-enum CardMode: String, CaseIterable {
-    /// Square to your line of sight, so it looks undistorted at any lid angle.
-    case facing
-    /// Standing vertically on the desk, like a physical card propped behind the keyboard.
-    case upright
-    /// Keeping the tilt the screen had when the card was anchored, so at that angle it sits exactly
-    /// on the screen, and stays there in space as the lid moves on.
-    case asPlaced
-    /// Drawn flat on the screen with no correction, for comparison.
-    case flat
-
-    var label: String {
-        switch self {
-        case .facing: "Facing you"
-        case .upright: "Upright"
-        case .asPlaced: "As placed"
-        case .flat: "Flat"
-        }
-    }
-}
-
 /// Where the card is drawn for: a viewpoint worked out from the screen itself, or the viewer's
 /// actual eye position.
 enum Viewpoint: String, CaseIterable {
@@ -39,15 +17,20 @@ enum Viewpoint: String, CaseIterable {
 /// Physical model of the laptop and the viewer's eye, in centimeters.
 ///
 /// World axes: x runs along the hinge to the right, y points up from the desk, z points toward
-/// the viewer. The hinge is the x-axis, so the base lies in the y = 0 plane.
+/// the viewer. The hinge's axis is the x-axis; it sits inside the back of the base, so the base's
+/// top lies just above the y = 0 plane.
 struct Rig {
     var lidAngle: Double
     var eyeDistance: Double
     var eyeHeight: Double
     var placement: ScreenPlacement
 
-    /// Distance from the hinge axis to the bottom edge of the lit display area.
-    static let hingeToDisplay = 1.2
+    /// Distance up the lid from the hinge's axis to the bottom edge of the lit display area, and how
+    /// far the display's glass lies behind the axis, away from the viewer: the lid's lower end swings
+    /// down behind the base, around an axis inside it. Measured from Apple's dimension drawing of the
+    /// 13-inch M4 MacBook Air, to about a millimeter.
+    static let hingeToDisplay = 1.66
+    static let glassBehindHinge = 0.4
 
     var eye: SIMD3<Double> { [0, eyeHeight, eyeDistance] }
 
@@ -71,7 +54,8 @@ struct Rig {
         let t = anchorAngle * .pi / 180, tip = lookingDown * .pi / 180
         // From the screen's middle, out along its normal, tipped up toward the screen's top.
         let outward = (height: -cos(t) * cos(tip) + sin(t) * sin(tip), ahead: sin(t) * cos(tip) + cos(t) * sin(tip))
-        return (distance: middle * cos(t) + distance * outward.ahead, height: middle * sin(t) + distance * outward.height)
+        return (distance: middle * cos(t) - glassBehindHinge * sin(t) + distance * outward.ahead,
+                height: middle * sin(t) + glassBehindHinge * cos(t) + distance * outward.height)
     }
 
     /// Distance from the hinge up the lid to the camera: centered in the notch, or just above the
@@ -93,7 +77,7 @@ struct Rig {
         let k = placement.cmPerPoint
         let x = (point.x - placement.displaySize.width / 2) * k
         let up = Self.hingeToDisplay + (placement.displaySize.height - point.y) * k
-        return SIMD3(x, 0, 0) + up * screenUp
+        return SIMD3(x, 0, 0) + up * screenUp - Self.glassBehindHinge * screenNormal
     }
 
     /// Where the line from the eye through `point` crosses the display, in display points.
@@ -101,7 +85,7 @@ struct Rig {
         let ray = point - eye
         let denominator = dot(screenNormal, ray)
         guard abs(denominator) > 1e-9 else { return nil }
-        let t = -dot(screenNormal, eye) / denominator
+        let t = (-Self.glassBehindHinge - dot(screenNormal, eye)) / denominator
         guard t > 0 else { return nil }
 
         let hit = eye + t * ray
@@ -110,22 +94,6 @@ struct Rig {
                        y: placement.displaySize.height - (dot(hit, screenUp) - Self.hingeToDisplay) / k)
     }
 
-    /// The card's up direction in the world, for a card anchored at `anchorAngle`. Its right
-    /// direction is always along the hinge.
-    func cardUp(at center: SIMD3<Double>, mode: CardMode, anchorAngle: Double) -> SIMD3<Double> {
-        switch mode {
-        case .flat:
-            return screenUp
-        case .asPlaced:
-            let t = anchorAngle * .pi / 180
-            return [0, sin(t), cos(t)]
-        case .upright:
-            return [0, 1, 0]
-        case .facing:
-            let toEye = normalize(SIMD3(0, eye.y - center.y, eye.z - center.z))
-            return [0, toEye.z, -toEye.y]
-        }
-    }
 
     /// How far a card with this up direction leans back relative to the screen, in degrees
     /// (negative leans forward).
@@ -137,38 +105,16 @@ struct Rig {
     /// Where to draw a card laid out in `frame` (display points), or nil when the screen is so close
     /// to edge-on from the eye that the card can't sensibly be drawn.
     ///
-    /// A flat card just sits in `frame`. The others hang still at the spot in space where the screen
-    /// held `frame`'s center when the lid was at `anchorAngle`. Every corner is traced from the eye,
-    /// so as the lid moves the card is drawn smaller when the screen comes closer, larger when it
-    /// moves away, and shifted to stay on the same line of sight, even if that's out of view.
-    ///
-    /// `pinnedAtBottom` instead keeps the card's bottom edge on the screen where `frame` puts it,
-    /// wherever the screen is now, and leans the card from there the way `mode` says, like a card
-    /// standing on the screen's bottom edge.
-    func cardPose(frame: CGRect, mode: CardMode, anchorAngle: Double, pinnedAtBottom: Bool = false) -> CardPose? {
-        let frameCenter = CGPoint(x: frame.midX, y: frame.midY)
-        guard mode != .flat else {
-            guard var pose = pose(center: world(fromDisplay: frameCenter), up: screenUp, size: frame.size, scale: 1)
-            else { return nil }
-            // A flat card never leaves the screen, but the screen itself moves: its depth is how much
-            // farther away each part now is than where the screen held it at the anchor angle, the
-            // way the eye was focused. That only depends on how far up the screen it is and how far
-            // the lid has turned, not on the eye.
-            var anchorRig = self
-            anchorRig.lidAngle = anchorAngle
-            pose.depthAtTop = dot(screenNormal, anchorRig.world(fromDisplay: CGPoint(x: frame.midX, y: frame.minY)))
-            pose.depthAtBottom = dot(screenNormal, anchorRig.world(fromDisplay: CGPoint(x: frame.midX, y: frame.maxY)))
-            return pose
-        }
-
+    /// The card is held still in space just where the screen held `frame` when the lid was at
+    /// `anchorAngle`, tilted as the screen was then, so at that angle it sits exactly on the screen.
+    /// Every corner is traced from the eye, so as the lid moves the card is drawn smaller when the
+    /// screen comes closer, larger when it moves away, and shifted to stay on the same line of sight,
+    /// even if that's out of view.
+    func cardPose(frame: CGRect, anchorAngle: Double) -> CardPose? {
         var anchorRig = self
         anchorRig.lidAngle = anchorAngle
-        var center = anchorRig.world(fromDisplay: frameCenter)
-        let up = cardUp(at: center, mode: mode, anchorAngle: anchorAngle)
-        if pinnedAtBottom {
-            let bottom = world(fromDisplay: CGPoint(x: frame.midX, y: frame.maxY))
-            center = bottom + up * (frame.height / 2 * placement.cmPerPoint)
-        }
+        let center = anchorRig.world(fromDisplay: CGPoint(x: frame.midX, y: frame.midY))
+        let up = anchorRig.screenUp
 
         // How big the card's middle is drawn: its line of sight meets the screen nearer or farther
         // than the card itself.
@@ -191,10 +137,8 @@ struct Rig {
         let corners: [SIMD3<Double>] = [top - right, top + right, bottom + right, bottom - right]
         let projected = corners.compactMap(display(fromWorld:))
         guard projected.count == 4 else { return nil }
-        // The eye is focused on the screen, whose plane runs through the hinge, so this is how much
-        // farther away than it each edge is (the normal points toward the viewer).
-        return CardPose(corners: projected, up: direction, scale: scale,
-                        depthAtTop: -dot(screenNormal, top), depthAtBottom: -dot(screenNormal, bottom))
+        // The eye is focused on the screen's glass.
+        return CardPose(corners: projected, world: corners, up: direction, scale: scale, focusNormal: screenNormal)
     }
 }
 
@@ -202,14 +146,14 @@ struct Rig {
 struct CardPose {
     /// Corners on the display in points: top-left, top-right, bottom-right, bottom-left.
     var corners: [CGPoint]
+    /// The same corners in the world, in centimeters.
+    var world: [SIMD3<Double>]
     /// The card's up direction in the world.
     var up: SIMD3<Double>
     /// How big the card's middle is drawn relative to its laid-out size.
     var scale: Double
-    /// How much farther away than where the eye is focused the card's top and bottom edges are, in
-    /// centimeters (negative is nearer).
-    var depthAtTop: Double
-    var depthAtBottom: Double
+    /// The plane the eye is focused on, the screen's glass, faces this way.
+    var focusNormal: SIMD3<Double>
 
     var boundingBox: CGRect {
         let xs = corners.map(\.x), ys = corners.map(\.y)

@@ -10,6 +10,18 @@ struct ScreenPlacement: Equatable {
     var isBuiltIn: Bool
     /// Height of the camera notch in points, or 0 on displays without one.
     var notchHeight: CGFloat
+
+    /// The placement of `rect`, in AppKit's screen coordinates, on `screen`.
+    init?(of rect: CGRect, on screen: NSScreen) {
+        guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        else { return nil }
+        frame = CGRect(x: rect.minX - screen.frame.minX, y: screen.frame.maxY - rect.maxY,
+                       width: rect.width, height: rect.height)
+        displaySize = screen.frame.size
+        cmPerPoint = CGDisplayScreenSize(id).width / 10 / screen.frame.width
+        isBuiltIn = CGDisplayIsBuiltin(id) != 0
+        notchHeight = screen.safeAreaInsets.top
+    }
 }
 
 /// Reports the placement of the space it fills whenever the window moves, resizes or changes display.
@@ -53,18 +65,9 @@ struct PlacementReader: NSViewRepresentable {
 
         private func report() {
             guard let window, let screen = window.screen,
-                  let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+                  let placement = ScreenPlacement(of: window.convertToScreen(convert(bounds, to: nil)), on: screen),
+                  placement != last
             else { return }
-
-            let rect = window.convertToScreen(convert(bounds, to: nil))
-            let placement = ScreenPlacement(
-                frame: CGRect(x: rect.minX - screen.frame.minX, y: screen.frame.maxY - rect.maxY,
-                              width: rect.width, height: rect.height),
-                displaySize: screen.frame.size,
-                cmPerPoint: CGDisplayScreenSize(id).width / 10 / screen.frame.width,
-                isBuiltIn: CGDisplayIsBuiltin(id) != 0,
-                notchHeight: screen.safeAreaInsets.top)
-            guard placement != last else { return }
             last = placement
 
             // Deliver outside the current layout pass so SwiftUI can update state freely.

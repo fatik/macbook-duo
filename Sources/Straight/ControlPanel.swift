@@ -24,8 +24,8 @@ struct PanelActions {
 /// The floating settings panel. It edits the stored settings directly; the window reads the same ones.
 ///
 /// A header that's always there shows the lid and holds the actions used most (re-center, full
-/// screen, hide). Below it, four tabs go from what's shown to how it sits in space, how it looks,
-/// and whom it's drawn for.
+/// screen, hide). Below it, four tabs: what's shown and how big, the Desert scene's own settings,
+/// how it's blurred and dimmed, and whom it's drawn for.
 struct ControlPanel: View {
     var setup: CardScene
     var sensor: LidSensor
@@ -43,12 +43,12 @@ struct ControlPanel: View {
     var actions: PanelActions
 
     enum Tab: String, CaseIterable {
-        case picture, placement, look, viewer
+        case picture, scene, look, viewer
 
         var title: String {
             switch self {
             case .picture: "Picture"
-            case .placement: "Placement"
+            case .scene: "Scene"
             case .look: "Look"
             case .viewer: "Viewer"
             }
@@ -57,7 +57,7 @@ struct ControlPanel: View {
         var symbol: String {
             switch self {
             case .picture: "photo.on.rectangle.angled"
-            case .placement: "rotate.3d"
+            case .scene: "mountain.2"
             case .look: "camera.filters"
             case .viewer: "eye"
             }
@@ -65,10 +65,8 @@ struct ControlPanel: View {
     }
 
     @AppStorage("panelTab") private var tab: Tab = .picture
-    @AppStorage("mode") private var mode: CardMode = .facing
     @AppStorage("cardSize") private var cardFill = 0.45
     @AppStorage("fillsWindow") private var fillsWindow = false
-    @AppStorage("pinnedAtBottom") private var pinnedAtBottom = true
     @AppStorage("backgroundColor") private var backgroundColor = 0x000000
     @AppStorage("cornerRadius") private var cornerRadius = ControlPanel.defaultCornerRadius
     @AppStorage("parallax") private var parallax = 0.6
@@ -85,7 +83,6 @@ struct ControlPanel: View {
     @AppStorage("eyeDistance") private var eyeDistance = 55.0
     @AppStorage("eyeHeight") private var eyeHeight = 35.0
     @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
-    @AppStorage("viewSensitivity") private var sensitivity = 1.0
     @AppStorage("viewDistance") private var viewDistance = 0.0
     @AppStorage("viewLookingDown") private var lookingDown = 0.0
     private var blur = StoredEffect.blur()
@@ -124,7 +121,7 @@ struct ControlPanel: View {
             Group {
                 switch tab {
                 case .picture: pictureTab
-                case .placement: placementTab
+                case .scene: sceneTab
                 case .look: lookTab
                 case .viewer: viewerTab
                 }
@@ -149,7 +146,7 @@ struct ControlPanel: View {
         LiveReadout(scene: setup, sensor: sensor) {
             PillButton(symbol: "scope", title: "Re-center", help: "Hold the card where the screen is now (R)",
                        action: actions.recenter)
-                .disabled(mode == .flat || lineUp.isActive)
+                .disabled(lineUp.isActive)
             RoundButton(symbol: isEdgeToEdge ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
                         help: isEdgeToEdge ? "Leave full screen (F or Esc)" : "Full screen, edge to edge (F)",
                         action: actions.toggleEdgeToEdge)
@@ -179,101 +176,6 @@ struct ControlPanel: View {
                 .padding(10)
             }
 
-            if source == .desert {
-                PanelSection("Parallax") {
-                    SliderRow("Strength", value: $parallax, shown: percent(parallax),
-                              help: "How strongly the layers move as the lid moves: the sand most, the mountains "
-                                  + "less, the sky barely.")
-                    RowDivider()
-                    PanelRow("Direction") {
-                        Picker("Direction", selection: $parallaxMotion) {
-                            ForEach(ParallaxMotion.allCases, id: \.self) { Text($0.shortLabel).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                    .help("Toward you: the layers come closer as the lid moves. Away from you: they start as close "
-                          + "as they come at the anchored angle and move back to the picture as it is.")
-                    RowDivider()
-                    MenuRow("Moves when", selection: $parallaxDirection, options: LidDirection.allCases, label: \.label)
-                        .help("Which lid movement moves the layers. They move fully once the lid has moved 45°.")
-                }
-
-                PanelSection("Clock", accessory: {
-                    Toggle("Show the date and time", isOn: $showsClock)
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .labelsHidden()
-                }) {
-                    if showsClock {
-                        SliderRow("Width", value: $clockWidth, in: 30...150, shown: "\(Int(clockWidth.rounded()))",
-                                  help: "SF Pro's width axis: 30 is very compressed, 100 normal, 150 very expanded.")
-                        RowDivider()
-                        SliderRow("Weight", value: $clockWeight, in: 100...900, shown: "\(Int(clockWeight.rounded()))",
-                                  help: "SF Pro's weight axis: 100 is thin, 400 regular, 900 heavy.")
-                        RowDivider()
-                        SliderRow("Height", value: $clockStretch, in: 1...2.2,
-                                  shown: clockStretch.formatted(.number.precision(.fractionLength(1))) + "×",
-                                  help: "Stretches the numerals taller, like a lock screen's clock.")
-                        RowDivider()
-                        SliderRow("Opacity", value: $clockOpacity, shown: percent(clockOpacity))
-                        RowDivider()
-                        MenuRow("Blend", selection: $clockBlend, options: ClockBlend.allCases, label: \.label)
-                            .help("How the clock mixes with the picture behind it. Plus Lighter and Screen let the "
-                                  + "sky's color show through, like frosted glass.")
-                        RowDivider()
-                        DisclosureRow("Motion", isExpanded: $showsClockMotion)
-                        if showsClockMotion {
-                            RowDivider()
-                            SliderRow("Depth", value: $clockDepth, shown: clockDepth < 0.005 ? "Fixed" : percent(clockDepth),
-                                      help: "Whether the clock moves with the parallax like a layer. At 0 it stays put; "
-                                          + "the sky moves like 12% and the mountains like 50%.")
-                            RowDivider()
-                            SliderRow("Blur", value: $clockBlur, shown: clockBlur < 0.005 ? "Sharp" : percent(clockBlur),
-                                      help: "How much the clock blurs where the scene does. At 0 it stays sharp and "
-                                          + "only dims.")
-                        }
-                    } else {
-                        Text("The date and time sit between the sky and the mountains, like a phone's lock screen.")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: Placement
-
-    private var placementTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            PanelSection("Hold the card") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("Mode", selection: $mode) {
-                        ForEach(CardMode.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    Text(mode.explanation)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(12)
-                if mode != .flat {
-                    RowDivider()
-                    PanelRow(setup.anchorAngle.map { "Anchored at \(Int($0.rounded()))°" } ?? "Anchored") {
-                        Button("Re-center", action: actions.recenter)
-                            .controlSize(.small)
-                            .disabled(lineUp.isActive)
-                    }
-                    .help("Hold the card where the screen is now (R). Everything moves from there as the lid moves.")
-                }
-            }
 
             PanelSection("Size") {
                 PanelRow("Fill the window") {
@@ -288,26 +190,8 @@ struct ControlPanel: View {
                 // Dragging the width takes the card back out of filling the window.
                 SliderRow("Width", value: Binding(get: { cardFill }, set: { cardFill = $0; fillsWindow = false }),
                           in: 0.1...2.5, shown: cardWidth.formatted(.number.precision(.fractionLength(1))) + " cm")
-                RowDivider()
-                PanelRow("Stand on the bottom edge") {
-                    Toggle("Stand on the bottom edge", isOn: $pinnedAtBottom)
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .labelsHidden()
-                }
-                .disabled(mode == .flat)
-                .help("Keeps the card's bottom edge on the screen's as the lid moves, leaning from there, so nothing "
-                      + "shows below it. Off, the whole card stays where it was in space.")
             }
-        }
-    }
 
-    // MARK: Look
-
-    private var lookTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            effectSection("Blur", blur, verb: "Blurs", isExpanded: $showsMoreBlur)
-            effectSection("Dim", dim, verb: "Dims", isExpanded: $showsMoreDim)
             PanelSection("Frame") {
                 SliderRow("Corners", value: $cornerRadius, in: 0...10,
                           shown: cornerRadius.formatted(.number.precision(.fractionLength(1))) + " mm",
@@ -332,6 +216,100 @@ struct ControlPanel: View {
                 .help("The color around the card, which shows as the lid moves it away from the window's edges, "
                       + "and through any clear parts of a picture.")
             }
+        }
+    }
+
+    // MARK: Scene
+
+    @ViewBuilder
+    private var sceneTab: some View {
+        if source == .desert {
+            VStack(alignment: .leading, spacing: 14) {
+                    PanelSection("Parallax") {
+                        SliderRow("Strength", value: $parallax, shown: percent(parallax),
+                                  help: "How strongly the layers move as the lid moves: the sand most, the mountains "
+                                      + "less, the sky barely.")
+                        RowDivider()
+                        PanelRow("Direction") {
+                            Picker("Direction", selection: $parallaxMotion) {
+                                ForEach(ParallaxMotion.allCases, id: \.self) { Text($0.shortLabel).tag($0) }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .fixedSize()
+                        }
+                        .help("Toward you: the layers come closer as the lid moves. Away from you: they start as close "
+                              + "as they come at the anchored angle and move back to the picture as it is.")
+                        RowDivider()
+                        MenuRow("Moves when", selection: $parallaxDirection, options: LidDirection.allCases, label: \.label)
+                            .help("Which lid movement moves the layers. They move fully once the lid has moved 45°.")
+                    }
+
+                    PanelSection("Clock", accessory: {
+                        Toggle("Show the date and time", isOn: $showsClock)
+                            .toggleStyle(.switch)
+                            .controlSize(.mini)
+                            .labelsHidden()
+                    }) {
+                        if showsClock {
+                            SliderRow("Width", value: $clockWidth, in: 30...150, shown: "\(Int(clockWidth.rounded()))",
+                                      help: "SF Pro's width axis: 30 is very compressed, 100 normal, 150 very expanded.")
+                            RowDivider()
+                            SliderRow("Weight", value: $clockWeight, in: 100...900, shown: "\(Int(clockWeight.rounded()))",
+                                      help: "SF Pro's weight axis: 100 is thin, 400 regular, 900 heavy.")
+                            RowDivider()
+                            SliderRow("Height", value: $clockStretch, in: 1...2.2,
+                                      shown: clockStretch.formatted(.number.precision(.fractionLength(1))) + "×",
+                                      help: "Stretches the numerals taller, like a lock screen's clock.")
+                            RowDivider()
+                            SliderRow("Opacity", value: $clockOpacity, shown: percent(clockOpacity))
+                            RowDivider()
+                            MenuRow("Blend", selection: $clockBlend, options: ClockBlend.allCases, label: \.label)
+                                .help("How the clock mixes with the picture behind it. Plus Lighter and Screen let the "
+                                      + "sky's color show through, like frosted glass.")
+                            RowDivider()
+                            DisclosureRow("Motion", isExpanded: $showsClockMotion)
+                            if showsClockMotion {
+                                RowDivider()
+                                SliderRow("Depth", value: $clockDepth, shown: clockDepth < 0.005 ? "Fixed" : percent(clockDepth),
+                                          help: "Whether the clock moves with the parallax like a layer. At 0 it stays put; "
+                                              + "the sky moves like 12% and the mountains like 50%.")
+                                RowDivider()
+                                SliderRow("Blur", value: $clockBlur, shown: clockBlur < 0.005 ? "Sharp" : percent(clockBlur),
+                                          help: "How much the clock blurs where the scene does. At 0 it stays sharp and "
+                                              + "only dims.")
+                            }
+                        } else {
+                            Text("The date and time sit between the sky and the mountains, like a phone's lock screen.")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                        }
+                    }
+            }
+        } else {
+            PanelSection("Desert") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("A layered scene: its sky, mountains and sand come toward you at different speeds as the lid "
+                         + "moves, with a lock-screen clock between them. Its settings are here once it's showing.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Show the Desert", action: actions.showDesert)
+                }
+                .padding(12)
+            }
+        }
+    }
+
+    // MARK: Look
+
+    private var lookTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            effectSection("Blur", blur, verb: "Blurs", isExpanded: $showsMoreBlur)
+            effectSection("Dim", dim, verb: "Dims", isExpanded: $showsMoreDim)
         }
     }
 
@@ -380,15 +358,16 @@ struct ControlPanel: View {
     private var viewerTab: some View {
         VStack(alignment: .leading, spacing: 14) {
             PanelSection("Drawn for", accessory: {
-                Button("Reset") {
-                    sensitivity = 1
-                    viewDistance = 0
-                    lookingDown = 0
+                if viewpoint == .screen {
+                    Button("Reset") {
+                        viewDistance = 0
+                        lookingDown = 0
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
+                    .disabled(viewDistance == 0 && lookingDown == 0)
+                    .help("Back to the usual distance and angle for the screen.")
                 }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
-                .disabled(sensitivity == 1 && viewDistance == 0 && lookingDown == 0)
-                .help("Back to 100% sensitivity and, from the screen, the usual distance and angle.")
             }) {
                 Picker("Viewpoint", selection: $viewpoint) {
                     ForEach(Viewpoint.allCases, id: \.self) { Text($0.label).tag($0) }
@@ -418,10 +397,6 @@ struct ControlPanel: View {
                               shown: "\(Int(eyeHeight.rounded())) cm",
                               help: "How far above the hinge your eyes are.")
                 }
-                RowDivider()
-                SliderRow("Sensitivity", value: $sensitivity, in: 0.25...2, shown: percent(sensitivity),
-                          help: "How much the lid's movement counts. Raise it if the picture doesn't move enough to "
-                              + "stay put, lower it if it moves too much.")
             }
 
             PanelSection("Calibrate") {
@@ -430,7 +405,6 @@ struct ControlPanel: View {
                                    ?? "Straighten the card by eye at a few lid angles; the viewpoint that fits "
                                       + "them all is used.",
                                button: "Start", action: actions.startLineUp)
-                    .disabled(mode == .flat)
                 RowDivider()
                 CalibrationRow(symbol: "camera", title: "Use the Camera", detail: cameraMessage,
                                button: calibrator.isMeasuring ? "Stop" : "Start",
@@ -461,18 +435,6 @@ struct ControlPanel: View {
 
     private func percent(_ value: Double) -> String {
         "\(Int((value * 100).rounded()))%"
-    }
-}
-
-extension CardMode {
-    /// One line on what the mode does.
-    var explanation: String {
-        switch self {
-        case .facing: "Turns to face you as the lid moves, so it always looks square-on."
-        case .upright: "Stands straight up, like a card propped behind the keyboard."
-        case .asPlaced: "Keeps the tilt the screen had when you re-centered, so it looks fixed in space."
-        case .flat: "No correction: flat on the screen, for comparison."
-        }
     }
 }
 

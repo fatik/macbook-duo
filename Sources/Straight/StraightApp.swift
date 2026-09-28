@@ -12,11 +12,22 @@ struct StraightApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 900, height: 640)
+
+        // Holding the real screen still runs from here.
+        MenuBarExtra("Straight", systemImage: "laptopcomputer") {
+            StillScreenMenu()
+        }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated { StillScreen.shared.installHotKey() }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        MainActor.assumeIsolated { !StillScreen.shared.isOn }
+    }
 }
 
 struct ContentView: View {
@@ -30,16 +41,14 @@ struct ContentView: View {
     @State private var sensor = LidSensor()
     @State private var calibrator = EyeCalibrator()
     @State private var lineUp = EyeLineUp()
-    /// The calibration target's copies, shown on the card while lining it up by eye.
-    @State private var lineUpTarget: BlurAtlas?
+    /// The calibration target's texture, shown on the card while lining it up by eye.
+    @State private var lineUpTarget: PictureTexture?
     @State private var placement: ScreenPlacement?
     /// The lid angle at which the card was put in place; it stays at that spot in space from then on.
     @State private var anchorAngle: Double?
-    @AppStorage("mode") private var mode: CardMode = .facing
     @AppStorage("eyeDistance") private var eyeDistance = 55.0
     @AppStorage("eyeHeight") private var eyeHeight = 35.0
     @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
-    @AppStorage("viewSensitivity") private var sensitivity = 1.0
     /// 0 means the default for the screen.
     @AppStorage("viewDistance") private var viewDistance = 0.0
     @AppStorage("viewLookingDown") private var lookingDown = 0.0
@@ -50,8 +59,6 @@ struct ContentView: View {
     @AppStorage("cornerRadius") private var cornerRadius = ControlPanel.defaultCornerRadius
     /// Whether the card covers the whole window instead of following the card width setting.
     @AppStorage("fillsWindow") private var fillsWindow = false
-    /// Whether the card's bottom edge stays on the screen's while it leans.
-    @AppStorage("pinnedAtBottom") private var pinnedAtBottom = true
     /// The color around the card, as 0xRRGGBB.
     @AppStorage("backgroundColor") private var backgroundColor = 0x000000
     private var blur = StoredEffect.blur()
@@ -59,11 +66,11 @@ struct ContentView: View {
     @State private var image: CGImage?
     /// The checkerboard as a picture, so it can go through the blur shader like a photo.
     @State private var checkerboard: CGImage?
-    @State private var atlas: BlurAtlas?
+    @State private var atlas: PictureTexture?
     /// A layered picture with parallax, shown instead of the image or checkerboard.
     @AppStorage("scene") private var sceneName = ""
     @State private var scene: ParallaxScene?
-    @State private var sceneAtlases: [BlurAtlas] = []
+    @State private var sceneAtlases: [PictureTexture] = []
     /// How strongly the scene's layers come toward you as the lid moves, from 0 to 1.
     @AppStorage("parallax") private var parallax = 0.6
     @AppStorage("parallaxDirection") private var parallaxDirection: LidDirection = .either
@@ -78,7 +85,7 @@ struct ContentView: View {
     @AppStorage("clockDepth") private var clockDepth = 0.0
     /// How strongly the clock blurs where the scene does, from 0 (stays sharp) to 1.
     @AppStorage("clockBlur") private var clockBlur = 0.0
-    @State private var clockAtlas: BlurAtlas?
+    @State private var clockAtlas: PictureTexture?
     @State private var isChoosingImage = false
     @State private var isDropTargeted = false
     @State private var showsControls = true
@@ -103,38 +110,35 @@ struct ContentView: View {
                     let source = image ?? checkerboard
 
                     CardRendererView(scene: setup, sensor: sensor)
-                    // The sharp copy only needs to be about as big as the card is drawn; a bigger one
+                    // The picture only needs to be about as big as the card is drawn; a bigger one
                     // would shimmer when shrunk. Remade only when that size changes by a fifth or so.
                     // A photo filling the window is trimmed to the window's shape first, since the
                     // rest never shows.
                     .task(id: AtlasRequest(source: source, longSide: max(cardSize.width, cardSize.height) * 3,
                                            aspect: fillsWindow && image != nil ? size.width / size.height : nil)) {
                         guard let source else { return }
-                        // A different picture shouldn't show the last one's copies while its own are made.
+                        // A different picture shouldn't show the last one while its own is made.
                         if atlas?.source != ObjectIdentifier(source) { atlas = nil }
                         let request = AtlasRequest(source: source, longSide: max(cardSize.width, cardSize.height) * 3,
                                                    aspect: fillsWindow && image != nil ? size.width / size.height : nil)
-                        if let made = await BlurAtlas.make(from: source, longSide: min(request.longSide, 3456),
+                        if let made = await PictureTexture.make(from: source, longSide: min(request.longSide, 3456),
                                                            aspect: request.aspect) {
                             atlas = made
                         }
                     }
-                    // Each layer of a scene gets its own copies; the sky is trimmed to the card's shape.
+                    // Each layer of a scene gets its own texture; the sky is trimmed to the card's shape.
                     .task(id: scene.map { SceneAtlasRequest(scene: $0.name,
                                                             longSide: AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 3),
                                                             aspect: (Double(cardSize.width / cardSize.height) * 100).rounded() / 100) }) {
                         guard let scene else { return sceneAtlases = [] }
                         let longSide = min(AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 3), 3456)
-                        var made: [BlurAtlas] = []
+                        var made: [PictureTexture] = []
                         let cardAspect = Double(cardSize.width / cardSize.height)
                         for layer in scene.layers {
-                            // Every layer's strongest blur is the same share of the card, whatever
-                            // part of it the layer covers.
-                            var fills = true, widthOnCard = 1.0
-                            if case .band(_, let width) = layer.placement { fills = false; widthOnCard = width }
-                            guard let atlas = await BlurAtlas.make(from: layer.image, longSide: longSide,
-                                                                   aspect: fills ? cardAspect : nil,
-                                                                   blurPerWidth: 1 / (widthOnCard * cardAspect * 8))
+                            var fills = true
+                            if case .band = layer.placement { fills = false }
+                            guard let atlas = await PictureTexture.make(from: layer.image, longSide: longSide,
+                                                                        aspect: fills ? cardAspect : nil)
                             else { return }
                             made.append(atlas)
                         }
@@ -147,7 +151,7 @@ struct ContentView: View {
                         guard let picture = CalibrationTarget.render(aspect: Double(cardSize.width / cardSize.height),
                                                                      longSide: longSide)
                         else { return }
-                        lineUpTarget = await BlurAtlas.make(from: picture, longSide: longSide)
+                        lineUpTarget = await PictureTexture.make(from: picture, longSide: longSide)
                     }
                     // The clock is redrawn as a picture whenever its style or the card changes, and
                     // again at the start of every minute.
@@ -164,7 +168,7 @@ struct ContentView: View {
                         while !Task.isCancelled {
                             let now = Date()
                             if let picture = ParallaxScene.renderClock(at: now, pixelSize: pixels, style: style),
-                               let made = await BlurAtlas.make(from: picture, longSide: longSide) {
+                               let made = await PictureTexture.make(from: picture, longSide: longSide) {
                                 clockAtlas = made
                             }
                             let nextMinute = (now.timeIntervalSince1970 / 60).rounded(.down) * 60 + 60.05
@@ -284,7 +288,6 @@ struct ContentView: View {
             recenter: { anchorAngle = sensor.angle },
             fillWindow: {
                 fillsWindow = true
-                mode = .asPlaced
                 anchorAngle = sensor.angle
             },
             chooseImage: { isChoosingImage = true },
@@ -319,17 +322,15 @@ struct ContentView: View {
     }
 
     /// Re-centers the card here and starts lining it up by eye, from a typical viewpoint: the one
-    /// worked out from the screen, at 100% sensitivity.
+    /// worked out from the screen.
     private func startLineUp(_ setup: CardScene) {
         let angle = sensor.angle
         let eye = typicalEye(anchor: angle, placement: setup.placement)
-        lineUp.start(at: angle, previous: .init(viewpoint: viewpoint, eyeDistance: eyeDistance,
-                                                eyeHeight: eyeHeight, sensitivity: sensitivity))
+        lineUp.start(at: angle, previous: .init(viewpoint: viewpoint, eyeDistance: eyeDistance, eyeHeight: eyeHeight))
         anchorAngle = angle
         viewpoint = .eyes
         eyeDistance = eye.distance
         eyeHeight = eye.height
-        sensitivity = 1
     }
 
     /// Keeps where the card is now as looking straight at this lid angle, and switches to the
@@ -355,7 +356,6 @@ struct ContentView: View {
         lineUp.add(sample, fit: fit)
         eyeDistance = fit.eyeDistance
         eyeHeight = fit.eyeHeight
-        sensitivity = fit.sensitivity
     }
 
     private func cancelLineUp() {
@@ -363,7 +363,6 @@ struct ContentView: View {
             viewpoint = previous.viewpoint
             eyeDistance = previous.eyeDistance
             eyeHeight = previous.eyeHeight
-            sensitivity = previous.sensitivity
         }
         lineUp.end()
     }
@@ -388,12 +387,11 @@ struct ContentView: View {
             blurNow.strength = 0
             dimNow.strength = 0
         }
-        var scene = CardScene(placement: placement, windowSize: windowSize, cardSize: cardSize, mode: mode,
-                         pinnedAtBottom: pinnedAtBottom, anchorAngle: anchorAngle, viewpoint: viewpoint,
-                         eyeDistance: eyeDistance, eyeHeight: eyeHeight, viewDistance: viewDistance,
-                         lookingDown: lookingDown, sensitivity: sensitivity, fillsWindow: fillsWindow,
-                         cornerRadius: cornerRadius, background: RGBColor(hex: backgroundColor),
-                         blur: blurNow, dim: dimNow, content: content)
+        var scene = CardScene(placement: placement, windowSize: windowSize, cardSize: cardSize,
+                              anchorAngle: anchorAngle, viewpoint: viewpoint, eyeDistance: eyeDistance,
+                              eyeHeight: eyeHeight, viewDistance: viewDistance, lookingDown: lookingDown,
+                              fillsWindow: fillsWindow, cornerRadius: cornerRadius,
+                              background: RGBColor(hex: backgroundColor), blur: blurNow, dim: dimNow, content: content)
         scene.adjustment = lineUp.adjustment
         return scene
     }
