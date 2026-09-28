@@ -113,11 +113,13 @@ It uses the hardened runtime with one entitlement, the camera, for calibrating b
 ./package.sh
 ```
 
-This makes `build/MacBook Duo <version>.dmg`. To hand it out, sign with a Developer ID Application
-certificate and have Apple notarize it: store your notarization credentials once with
-`xcrun notarytool store-credentials <profile>`, then run `NOTARY_PROFILE=<profile> ./package.sh`,
-which notarizes, staples and checks the disk image. The version is `VERSION` in `build.sh`; the
-build number is the commit count.
+This makes `build/MacBook Duo <version>.dmg`. To hand it out so it opens on any Mac without a
+warning, it needs a Developer ID Application certificate (Xcode › Settings › Accounts › Manage
+Certificates), which `build.sh` then signs with, and Apple's notarization: store your credentials
+once with `xcrun notarytool store-credentials <profile>`, then run
+`NOTARY_PROFILE=<profile> ./package.sh`. It notarizes and staples the app, then the disk image
+around it, and checks both as Gatekeeper will. The version is `VERSION` in `build.sh`; the build
+number is the commit count.
 
 ### The code
 
