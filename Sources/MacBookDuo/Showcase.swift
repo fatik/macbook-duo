@@ -61,16 +61,7 @@ struct ShowcaseView: View {
     @AppStorage("parallax") private var parallax = 0.6
     @AppStorage("parallaxDirection") private var parallaxDirection: LidDirection = .either
     @AppStorage("parallaxMotion") private var parallaxMotion: ParallaxMotion = .toward
-    @AppStorage("showsClock") private var showsClock = true
-    @AppStorage("clockWeight") private var clockWeight = ClockStyle.phone.weight
-    @AppStorage("clockWidth") private var clockWidth = ClockStyle.phone.width
-    @AppStorage("clockStretch") private var clockStretch = ClockStyle.phone.stretch
-    @AppStorage("clockOpacity") private var clockOpacity = 1.0
-    @AppStorage("clockBlend") private var clockBlend: ClockBlend = .normal
-    /// How near the clock is, for parallax, from 0 (stays put) to 1 (moves with the nearest layer).
-    @AppStorage("clockDepth") private var clockDepth = 0.0
-    /// How strongly the clock blurs where the scene does, from 0 (stays sharp) to 1.
-    @AppStorage("clockBlur") private var clockBlur = 0.0
+    /// The date and time, drawn between the scene's layers.
     @State private var clockAtlas: PictureTexture?
     @State private var isChoosingImage = false
     @State private var isDropTargeted = false
@@ -139,21 +130,19 @@ struct ShowcaseView: View {
                         else { return }
                         lineUpTarget = await PictureTexture.make(from: picture, longSide: longSide)
                     }
-                    // The clock is redrawn as a picture whenever its style or the card changes, and
-                    // again at the start of every minute.
-                    .task(id: scene != nil && showsClock ? ClockRequest(
-                        style: ClockStyle(weight: clockWeight, width: clockWidth, stretch: clockStretch),
+                    // The clock is redrawn as a picture whenever the card changes, and again at the
+                    // start of every minute.
+                    .task(id: scene != nil ? ClockRequest(
                         longSide: AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 3),
                         aspect: (Double(cardSize.width / cardSize.height) * 100).rounded() / 100) : nil) {
-                        guard scene != nil, showsClock else { return clockAtlas = nil }
+                        guard scene != nil else { return clockAtlas = nil }
                         let longSide = min(AtlasRequest.bucket(max(cardSize.width, cardSize.height) * 3), 3456)
                         let aspect = Double(cardSize.width / cardSize.height)
                         let pixels = aspect >= 1 ? CGSize(width: longSide, height: longSide / aspect)
                                                  : CGSize(width: longSide * aspect, height: longSide)
-                        let style = ClockStyle(weight: clockWeight, width: clockWidth, stretch: clockStretch)
                         while !Task.isCancelled {
                             let now = Date()
-                            if let picture = ParallaxScene.renderClock(at: now, pixelSize: pixels, style: style),
+                            if let picture = ParallaxScene.renderClock(at: now, pixelSize: pixels),
                                let made = await PictureTexture.make(from: picture, longSide: longSide) {
                                 clockAtlas = made
                             }
@@ -246,6 +235,7 @@ struct ShowcaseView: View {
         // Asked for from the welcome, the menu bar or Settings, once the window knows where it is.
         .onChange(of: app.request, initial: true) { handleRequest() }
         .onChange(of: placement) { handleRequest() }
+        .onChange(of: EdgeToEdge.shared.isActive) { handleRequest() }
         .sheet(isPresented: $asksForScreenRecording) {
             ScreenRecordingSheet()
         }
@@ -278,8 +268,10 @@ struct ShowcaseView: View {
         .accessibilityHidden(true)
     }
 
+    /// Handled by whichever copy is in view: the one full screen while that's up, else the window's.
     private func handleRequest() {
-        guard mode == .full, let request = app.request, let placement else { return }
+        guard mode == .full, isEdgeToEdge == EdgeToEdge.shared.isActive, let request = app.request, let placement
+        else { return }
         app.request = nil
         switch request {
         case .lineUp:
@@ -399,10 +391,7 @@ struct ShowcaseView: View {
     private func cardScene(placement: ScreenPlacement, windowSize: CGSize, cardSize: CGSize) -> CardScene {
         var content: CardScene.Content
         if let scene, sceneAtlases.count == scene.layers.count {
-            let clock = showsClock ? clockAtlas.map {
-                CardScene.Clock(atlas: $0, depth: clockDepth, blur: clockBlur, opacity: clockOpacity, blend: clockBlend)
-            } : nil
-            content = .layers(scene, sceneAtlases, clock: clock,
+            content = .layers(scene, sceneAtlases, clock: clockAtlas,
                               parallax: Parallax(strength: parallax, direction: parallaxDirection, motion: parallaxMotion))
         } else if scene == nil, let atlas {
             content = .picture(atlas, crops: fills && image != nil)

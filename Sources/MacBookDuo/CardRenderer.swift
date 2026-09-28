@@ -4,16 +4,11 @@ import MetalPerformanceShaders
 import QuartzCore
 import SwiftUI
 
-/// One picture drawn on the card: its texture, where it sits, and how it mixes with the
-/// layers behind it.
+/// One picture drawn on the card, over the layers behind it: its texture and where it sits.
 struct CardLayer {
     var atlas: PictureTexture
     /// Where the picture sits on the card, in fractions of the card's size.
     var rect: CGRect
-    /// How strongly it blurs where the blur is full.
-    var blur: Double
-    var opacity: Double = 1
-    var blend: ClockBlend = .normal
 
     /// Where a picture of `aspect` goes to fill a card of `cardAspect`, its middle cropped to fit.
     static func filling(aspect: Double, cardAspect: Double) -> CGRect {
@@ -110,20 +105,11 @@ struct CardFrame {
         values[51] = Float(focus.reference)
 
         for layer in layers {
-            var packed = [Float](repeating: 0, count: 48)
-            let rect = layer.rect
-            packed[0] = Float(1 / rect.width)
-            packed[1] = Float(1 / rect.height)
-            packed[2] = Float(-rect.minX / rect.width)
-            packed[3] = Float(-rect.minY / rect.height)
-            packed[4] = Float(layer.blur)
-            packed[5] = Float(layer.opacity)
-            packed[6] = Float(ClockBlend.allCases.firstIndex(of: layer.blend) ?? 0)
-            packed[8] = Float(layer.atlas.pixelSize.width)
-            packed[9] = Float(layer.atlas.pixelSize.height)
-            let tile = layer.atlas.tiles[0]
-            packed.replaceSubrange(10..<14, with: [Float(tile.minX), Float(tile.minY), Float(tile.width), Float(tile.height)])
-            values += packed
+            let rect = layer.rect, tile = layer.atlas.tiles[0]
+            values += [Float(1 / rect.width), Float(1 / rect.height),
+                       Float(-rect.minX / rect.width), Float(-rect.minY / rect.height),
+                       Float(layer.atlas.pixelSize.width), Float(layer.atlas.pixelSize.height),
+                       Float(tile.minX), Float(tile.minY), Float(tile.width), Float(tile.height)]
         }
         self.values = values
         textures = layers.map(\.atlas.texture)
@@ -133,12 +119,8 @@ struct CardFrame {
     /// fade that hasn't come in yet blurs nothing.
     var blurs: Bool { values[18] != 0 && values[15] > 0 && (values[18] < 2 || values[20] > 0) }
 
-    /// The most any part of the card is blurred, as a share of the full blur: the card's strength, or
-    /// a layer's own if that's stronger.
-    var strongestBlur: Double {
-        let layers = (0..<Int(values[31])).map { values[52 + $0 * 48 + 4] }
-        return Double(min(max(layers.reduce(values[15], max), 0), 1))
-    }
+    /// The most any part of the card is blurred, as a share of the full blur.
+    var strongestBlur: Double { Double(min(max(values[15], 0), 1)) }
 
     func isSame(as other: CardFrame?) -> Bool {
         guard let other, values == other.values, textures.count == other.textures.count else { return false }

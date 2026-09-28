@@ -33,18 +33,9 @@ struct CardScene {
         case picture(PictureTexture, crops: Bool)
         /// The screen itself, as it looks right now.
         case live(ScreenMirror)
-        /// A layered scene, with its layers' textures in the same order.
-        case layers(ParallaxScene, [PictureTexture], clock: Clock?, parallax: Parallax)
-    }
-
-    /// The date and time drawn between a scene's layers.
-    struct Clock {
-        var atlas: PictureTexture
-        /// How much it comes closer with the parallax, from 0 (stays put) to 1 (like the nearest layer).
-        var depth: Double
-        var blur: Double
-        var opacity: Double
-        var blend: ClockBlend
+        /// A layered scene, with its layers' textures in the same order, and the date and time
+        /// to draw between them.
+        case layers(ParallaxScene, [PictureTexture], clock: PictureTexture?, parallax: Parallax)
     }
 
     /// Where the card is laid out, in display points.
@@ -102,12 +93,12 @@ struct CardScene {
             return nil
         case .live(let mirror):
             guard let latest = mirror.latest else { return nil }
-            layers = [CardLayer(atlas: latest.picture, rect: CGRect(x: 0, y: 0, width: 1, height: 1), blur: blur.strength)]
+            layers = [CardLayer(atlas: latest.picture, rect: CGRect(x: 0, y: 0, width: 1, height: 1))]
             liveFrame = latest.count
         case .picture(let atlas, let crops):
             let rect = crops ? CardLayer.filling(aspect: atlas.aspect, cardAspect: cardAspect)
                              : CGRect(x: 0, y: 0, width: 1, height: 1)
-            layers = [CardLayer(atlas: atlas, rect: rect, blur: blur.strength)]
+            layers = [CardLayer(atlas: atlas, rect: rect)]
         case .layers(let scene, let atlases, let clock, let parallax):
             guard atlases.count == scene.layers.count else { return nil }
             // The layers move toward you, or away, as the lid moves from where the card was
@@ -115,13 +106,11 @@ struct CardScene {
             let closer = parallax.closer(anchor: anchor, lidAngle: rig.lidAngle)
             for (index, layer) in scene.layers.enumerated() {
                 if index == scene.clockBefore, let clock {
-                    let rect = ParallaxScene.grown(CGRect(x: 0, y: 0, width: 1, height: 1), by: closer * clock.depth)
-                    layers.append(CardLayer(atlas: clock.atlas, rect: rect, blur: clock.blur,
-                                            opacity: clock.opacity, blend: clock.blend))
+                    let rect = ParallaxScene.grown(CGRect(x: 0, y: 0, width: 1, height: 1), by: closer * scene.clockDepth)
+                    layers.append(CardLayer(atlas: clock, rect: rect))
                 }
                 layers.append(CardLayer(atlas: atlases[index],
-                                        rect: ParallaxScene.rect(for: layer, cardAspect: cardAspect, closer: closer),
-                                        blur: blur.strength))
+                                        rect: ParallaxScene.rect(for: layer, cardAspect: cardAspect, closer: closer)))
             }
         }
 

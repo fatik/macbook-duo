@@ -38,7 +38,7 @@ Closing the window keeps MacBook Duo in the menu bar.
 
 - **Picture**: the desert, a test pattern, or your own image (drop one on the window). Size, corners
   and background.
-- **Scene**: the desert's parallax and its clock.
+- **Scene**: how much the desert's layers move.
 - **Look**: blur and dim, by depth or from an edge.
 - **Calibration**: the viewing position, and both ways to calibrate.
 

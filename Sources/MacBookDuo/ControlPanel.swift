@@ -72,14 +72,6 @@ struct ControlPanel: View {
     @AppStorage("parallax") private var parallax = 0.6
     @AppStorage("parallaxDirection") private var parallaxDirection: LidDirection = .either
     @AppStorage("parallaxMotion") private var parallaxMotion: ParallaxMotion = .toward
-    @AppStorage("showsClock") private var showsClock = true
-    @AppStorage("clockWeight") private var clockWeight = ClockStyle.phone.weight
-    @AppStorage("clockWidth") private var clockWidth = ClockStyle.phone.width
-    @AppStorage("clockStretch") private var clockStretch = ClockStyle.phone.stretch
-    @AppStorage("clockOpacity") private var clockOpacity = 1.0
-    @AppStorage("clockBlend") private var clockBlend: ClockBlend = .normal
-    @AppStorage("clockDepth") private var clockDepth = 0.0
-    @AppStorage("clockBlur") private var clockBlur = 0.0
     @AppStorage("eyeDistance") private var eyeDistance = 55.0
     @AppStorage("eyeHeight") private var eyeHeight = 35.0
     @AppStorage("viewpoint") private var viewpoint: Viewpoint = .screen
@@ -88,7 +80,6 @@ struct ControlPanel: View {
     private var blur = StoredEffect.blur()
     private var dim = StoredEffect.dim()
 
-    @State private var showsClockMotion = false
     @State private var showsMoreBlur = false
     @State private var showsMoreDim = false
 
@@ -208,65 +199,22 @@ struct ControlPanel: View {
     @ViewBuilder
     private var sceneTab: some View {
         if source == .desert {
-            VStack(alignment: .leading, spacing: 14) {
-                    PanelSection("Parallax") {
-                        SliderRow("Strength", value: $parallax, shown: percent(parallax),
-                                  help: "How much the layers move as you tilt.")
-                        RowDivider()
-                        PanelRow("Direction") {
-                            Picker("Direction", selection: $parallaxMotion) {
-                                ForEach(ParallaxMotion.allCases, id: \.self) { Text($0.shortLabel).tag($0) }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .fixedSize()
-                        }
-                        .help("Toward you: the layers come closer as you tilt. Away: they start close and move back.")
-                        RowDivider()
-                        MenuRow("Moves when", selection: $parallaxDirection, options: LidDirection.allCases, label: \.label)
-                            .help("Which way of tilting moves the layers.")
+            PanelSection("Parallax") {
+                SliderRow("Strength", value: $parallax, shown: percent(parallax),
+                          help: "How much the layers move as you tilt.")
+                RowDivider()
+                PanelRow("Direction") {
+                    Picker("Direction", selection: $parallaxMotion) {
+                        ForEach(ParallaxMotion.allCases, id: \.self) { Text($0.shortLabel).tag($0) }
                     }
-
-                    PanelSection("Clock", accessory: {
-                        Toggle("Show the date and time", isOn: $showsClock)
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
-                            .labelsHidden()
-                    }) {
-                        if showsClock {
-                            SliderRow("Width", value: $clockWidth, in: 30...150, shown: "\(Int(clockWidth.rounded()))",
-                                      help: "30 is condensed, 150 is expanded.")
-                            RowDivider()
-                            SliderRow("Weight", value: $clockWeight, in: 100...900, shown: "\(Int(clockWeight.rounded()))",
-                                      help: "100 is thin, 900 is heavy.")
-                            RowDivider()
-                            SliderRow("Height", value: $clockStretch, in: 1...2.2,
-                                      shown: clockStretch.formatted(.number.precision(.fractionLength(1))) + "×",
-                                      help: "Makes the numbers taller.")
-                            RowDivider()
-                            SliderRow("Opacity", value: $clockOpacity, shown: percent(clockOpacity))
-                            RowDivider()
-                            MenuRow("Blend", selection: $clockBlend, options: ClockBlend.allCases, label: \.label)
-                                .help("How the clock blends with the sky.")
-                            RowDivider()
-                            DisclosureRow("Motion", isExpanded: $showsClockMotion)
-                            if showsClockMotion {
-                                RowDivider()
-                                SliderRow("Depth", value: $clockDepth, shown: clockDepth < 0.005 ? "Fixed" : percent(clockDepth),
-                                          help: "How much the clock moves with the layers.")
-                                RowDivider()
-                                SliderRow("Blur", value: $clockBlur, shown: clockBlur < 0.005 ? "Sharp" : percent(clockBlur),
-                                          help: "How much the clock blurs with the scene.")
-                            }
-                        } else {
-                            Text("The date and time, like a lock screen.")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 9)
-                        }
-                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                .help("Toward you: the layers come closer as you tilt. Away: they start close and move back.")
+                RowDivider()
+                MenuRow("Moves when", selection: $parallaxDirection, options: LidDirection.allCases, label: \.label)
+                    .help("Which way of tilting moves the layers.")
             }
         } else {
             PanelSection("Desert") {

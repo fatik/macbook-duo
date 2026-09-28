@@ -37,7 +37,6 @@ enum Defaults {
             "fillsWindow": true,
             "backgroundColor": 0x000000,
             "cornerRadius": LidGeometry.current.cornerRadius,
-            "showsClock": true,
             "parallax": 0.6,
             "parallaxDirection": LidDirection.either.rawValue,
             "parallaxMotion": ParallaxMotion.toward.rawValue,

@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// A picture built from layers at different depths that come toward you at different speeds as the
-/// lid moves, the way a layered lock-screen wallpaper does. The clock sits between the layers and
-/// stays put.
+/// lid moves, the way a layered lock-screen wallpaper does. The date and time sit between the layers,
+/// at a depth of their own, and move and blur like them.
 struct ParallaxScene {
     struct Layer {
         var image: CGImage
@@ -25,6 +25,8 @@ struct ParallaxScene {
     var layers: [Layer]
     /// The clock goes in front of the layers before this index and behind the rest.
     var clockBefore: Int
+    /// How near the clock is, like a layer's depth.
+    var clockDepth: Double
 
     /// The card's width over its height when showing a scene.
     static let aspect = 1.5
@@ -44,7 +46,8 @@ struct ParallaxScene {
             Layer(image: sky, depth: 0.12, placement: .fill),
             Layer(image: mountains, depth: 0.5, placement: .band(bottom: 0.8, width: 1.2)),
             Layer(image: sand, depth: 1, placement: .band(bottom: 1.08, width: 1)),
-        ], clockBefore: 1)
+        // The clock in front of the sky and behind the mountains, about halfway between them.
+        ], clockBefore: 1, clockDepth: 0.3)
     }
 
     /// Where `layer` sits on a card of `cardAspect`, in fractions of the card's size, grown by
@@ -101,50 +104,12 @@ struct Parallax {
     }
 }
 
-/// How the clock is drawn, using SF Pro's variable axes.
-struct ClockStyle: Equatable {
-    /// SF Pro's weight axis, from 1 (hairline) to 1000 (black).
-    var weight: Double
-    /// SF Pro's width axis, from 30 (very compressed) to 150 (very expanded).
-    var width: Double
-    /// How much taller than normal the numerals are drawn.
-    var stretch: Double
-
-    /// Close to a phone's lock-screen clock: narrow, medium weight, at its natural height.
-    static let phone = ClockStyle(weight: 480, width: 36, stretch: 1)
-}
-
-/// How the clock mixes with the picture behind it.
-enum ClockBlend: String, CaseIterable {
-    case normal, plusLighter, screen, softLight, overlay
-
-    var label: String {
-        switch self {
-        case .normal: "Normal"
-        case .plusLighter: "Plus Lighter"
-        case .screen: "Screen"
-        case .softLight: "Soft Light"
-        case .overlay: "Overlay"
-        }
-    }
-
-    var mode: BlendMode {
-        switch self {
-        case .normal: .normal
-        case .plusLighter: .plusLighter
-        case .screen: .screen
-        case .softLight: .softLight
-        case .overlay: .overlay
-        }
-    }
-}
-
 extension ParallaxScene {
     /// The date and time, lock-screen style, as a picture the card's size with a clear background,
     /// so it can sit between layers and dim with them.
     @MainActor
-    static func renderClock(at date: Date, pixelSize: CGSize, style: ClockStyle) -> CGImage? {
-        let renderer = ImageRenderer(content: ClockFace(date: date, style: style)
+    static func renderClock(at date: Date, pixelSize: CGSize) -> CGImage? {
+        let renderer = ImageRenderer(content: ClockFace(date: date)
             .frame(width: pixelSize.width, height: pixelSize.height))
         renderer.scale = 1
         return renderer.cgImage
@@ -154,7 +119,10 @@ extension ParallaxScene {
 /// The date just above the time, placed like a phone's lock screen on the frame it's given.
 private struct ClockFace: View {
     var date: Date
-    var style: ClockStyle
+
+    /// Close to a phone's lock-screen clock: SF Pro narrow and of medium weight, on its width and
+    /// weight axes.
+    private static let timeWidth = 36.0, timeWeight = 480.0
 
     /// Where the tops of the digits and of the date's letters sit, and how tall the digits are, as
     /// fractions of the frame's height.
@@ -177,9 +145,9 @@ private struct ClockFace: View {
             let height = geometry.size.height
             // Sized and placed by SF Pro's own measurements, so the digits and letters land exactly
             // where a lock screen puts them, whatever the width and weight.
-            let timeFont = sfPro(size: 100, weight: style.weight, width: style.width)
+            let timeFont = sfPro(size: 100, weight: Self.timeWeight, width: Self.timeWidth)
             let timeSize = height * Self.digitHeight / (CTFontGetCapHeight(timeFont) / 100)
-            let time = sfPro(size: timeSize, weight: style.weight, width: style.width)
+            let time = sfPro(size: timeSize, weight: Self.timeWeight, width: Self.timeWidth)
             let dateFont = sfPro(size: 100, weight: 590, width: 100)
             let dateSize = height * Self.dateHeight / (CTFontGetCapHeight(dateFont) / 100)
             let dateLine = sfPro(size: dateSize, weight: 590, width: 100)
@@ -195,7 +163,6 @@ private struct ClockFace: View {
                     // Solid at the top, letting a little of the picture through toward the bottom.
                     .foregroundStyle(LinearGradient(colors: [.white, .white.opacity(0.78)],
                                                     startPoint: .top, endPoint: .bottom))
-                    .scaleEffect(x: 1, y: style.stretch, anchor: .top)
                     .offset(y: height * Self.timeTop - (CTFontGetAscent(time) - CTFontGetCapHeight(time)))
             }
             .frame(width: geometry.size.width, height: height, alignment: .top)
@@ -218,7 +185,6 @@ func sfPro(size: CGFloat, weight: Double, width: Double) -> CTFont {
 
 /// What the clock picture depends on, so it's only redrawn when this changes (and each minute).
 struct ClockRequest: Equatable {
-    var style: ClockStyle
     var longSide: Double
     var aspect: Double
 }

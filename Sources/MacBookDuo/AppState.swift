@@ -47,7 +47,8 @@ final class AppState {
     func showMainWindow(_ request: Request? = nil) {
         if let request { self.request = request }
         NSApp.activate()
-        openMainWindow?()
+        // Full screen, that's the window to show.
+        if EdgeToEdge.shared.isActive { EdgeToEdge.shared.bringForward() } else { openMainWindow?() }
     }
 
     /// Whether MacBook Duo has an icon in the Dock as well as in the menu bar.

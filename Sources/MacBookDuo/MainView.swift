@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// The main window: the welcome the first time, then the picture held still, or while the whole screen
-/// is being held, what's going on and how to stop it. A Mac without a lid sensor gets told so.
+/// The main window: the picture held still, or while the whole screen is being held, what's going on
+/// and how to stop it. The first time, it makes way for the welcome, over the whole screen. A Mac
+/// without a lid sensor gets told so.
 struct MainView: View {
     @AppStorage(Defaults.onboardingCompleted) private var onboardingCompleted = false
     @Environment(\.openWindow) private var openWindow
@@ -14,10 +15,7 @@ struct MainView: View {
             if !sensor.isAvailable {
                 NoSensorView()
             } else if !onboardingCompleted {
-                OnboardingView { request in
-                    onboardingCompleted = true
-                    app.request = request
-                }
+                WelcomeLauncher()
             } else if still.isOn {
                 // The picture would be held twice over: the whole screen already is.
                 ScreenHeldView()

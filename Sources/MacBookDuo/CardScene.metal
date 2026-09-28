@@ -28,13 +28,12 @@ using namespace metal;
 //   36-50 in the world, in centimeters from a point on the screen's glass: the eye, the card's
 //         top-left corner, the way to its top-right and bottom-left corners, and the facing of the
 //         plane the eye is focused on (the glass)   51 the viewing distance depths are measured at
-//   52 on, 48 for each layer, back to front:
+//   52 on, 10 for each layer, back to front:
 //         0-1 picture scale  2-3 picture offset (card position to picture position)
-//         4 blur strength    5 opacity   6 blend (0 normal, 1 plus lighter, 2 screen, 3 soft light,
-//         4 overlay)         8-9 texture size    10-13 where the picture sits in it (x, y, width, height)
+//         4-5 texture size   6-9 where the picture sits in it (x, y, width, height)
 
 constant int firstLayer = 52;
-constant int layerLength = 48;
+constant int layerLength = 10;
 
 struct Rasterized {
     float4 position [[position]];
@@ -174,31 +173,9 @@ static float pixelCoverage(float2 uv, float2 points, float radius, float pixelsP
 static half4 sampleLayer(texture2d<half> picture, constant float *layer, float2 uv) {
     constexpr sampler linear(coord::normalized, filter::linear, address::clamp_to_edge);
     float2 at = uv * float2(layer[0], layer[1]) + float2(layer[2], layer[3]);
-    float2 origin = float2(layer[10], layer[11]), extent = float2(layer[12], layer[13]);
+    float2 origin = float2(layer[6], layer[7]), extent = float2(layer[8], layer[9]);
     float2 pixel = origin + clamp(at * extent, float2(0.5), extent - 0.5);
-    return picture.sample(linear, pixel / float2(layer[8], layer[9]));
-}
-
-static float3 softLight(float3 below, float3 top) {
-    float3 lifted = select(sqrt(below), ((16 * below - 12) * below + 4) * below, below <= 0.25);
-    return select(below + (2 * top - 1) * (lifted - below), below - (1 - 2 * top) * below * (1 - below), top <= 0.5);
-}
-
-static float3 overlay(float3 below, float3 top) {
-    return select(1 - 2 * (1 - top) * (1 - below), 2 * top * below, below <= 0.5);
-}
-
-/// `top` mixed onto `below`, both with premultiplied alpha.
-static float4 blend(float4 top, float4 below, int mode) {
-    if (mode == 1) { return min(top + below, 1.0); }
-    if (mode == 2) { return top + below - top * below; }
-    if (mode == 3 || mode == 4) {
-        float3 s = top.rgb / max(top.a, 1e-4), b = below.rgb / max(below.a, 1e-4);
-        float3 mixed = mode == 3 ? softLight(b, s) : overlay(b, s);
-        return float4((1 - top.a) * below.rgb + (1 - below.a) * top.rgb + top.a * below.a * mixed,
-                      top.a + below.a - top.a * below.a);
-    }
-    return top + below * (1 - top.a);
+    return picture.sample(linear, pixel / float2(layer[4], layer[5]));
 }
 
 /// A little noise for each pixel, from 0 to 1, evenly spread.
@@ -237,16 +214,13 @@ fragment float4 cardFragment(Rasterized in [[stage_in]], constant float *values 
     // Around the card, the blur carries on as it is at the card's edge, so the outline blurs too.
     if (covered < 0.002) { return float4(background, forGlass ? saturate(values[15] * amount) : 1); }
 
+    // The layers, each over the ones behind it. Colors are premultiplied.
     float4 color = 0;
-    // Blur strength follows whichever layer shows in front, like the clock with its own.
-    float strength = values[15];
     int count = int(values[31]);
     #define MIX_LAYER(index, atlas) \
         if (count > index) { \
-            constant float *layer = values + firstLayer + index * layerLength; \
-            float4 top = float4(sampleLayer(atlas, layer, uv)) * layer[5]; \
-            color = blend(top, color, int(layer[6])); \
-            strength = mix(strength, layer[4], top.a); \
+            float4 top = float4(sampleLayer(atlas, values + firstLayer + index * layerLength, uv)); \
+            color = top + color * (1 - top.a); \
         }
     MIX_LAYER(0, atlas0) MIX_LAYER(1, atlas1) MIX_LAYER(2, atlas2)
     MIX_LAYER(3, atlas3) MIX_LAYER(4, atlas4) MIX_LAYER(5, atlas5)
@@ -256,7 +230,7 @@ fragment float4 cardFragment(Rasterized in [[stage_in]], constant float *values 
     // The card over the background, which also shows through any clear parts of the picture.
     float3 shown = color.rgb * covered + background * (1 - covered * color.a);
     // For the blurred copies: how much of the full blur this pixel gets.
-    if (forGlass) { return float4(shown, saturate(strength * amount)); }
+    if (forGlass) { return float4(shown, saturate(values[15] * amount)); }
     // A little noise, under a step of 8-bit color, so slow dark fades don't band.
     return float4(shown + (noise(in.position.xy) - 0.5) / 255, 1);
 }
