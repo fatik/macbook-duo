@@ -9,11 +9,25 @@ reads the lid angle sensor in the hinge and redraws the screen for where your ey
 **Screen Effect** and everything on your screen gets the effect as you tilt, then settles back when
 you stop.
 
+<p align="center">
+  <img src="Design/Screenshots/tilt.webp" width="720" alt="The desert scene as MacBook Duo draws it while the lid tilts back and forth">
+  <br><sub>What the screen draws as the lid tilts. From where you sit, the picture stays put.</sub>
+</p>
+
 ## Download
 
 **[Download MacBook Duo](https://github.com/fatik/macbook-duo/releases/latest/download/MacBook-Duo.dmg)**, open it,
 and drag MacBook Duo into Applications. It's signed and notarized by Apple, so it opens without a
 warning.
+
+## Screenshots
+
+| | |
+|---|---|
+| <img src="Design/Screenshots/welcome.jpg" alt="The welcome: a card over the desert asking you to tilt your screen"> | <img src="Design/Screenshots/tilted.jpg" alt="The desert drawn for a tilted lid, blurring toward the top"> |
+| **The welcome.** Tilt your screen to see the effect. | **Tilted.** Drawn for where your eyes are, so it looks still. |
+| <img src="Design/Screenshots/controls.jpg" alt="The desert with the control panel open in the corner"> | <img src="Design/Screenshots/calibrate.jpg" alt="Calibrating with the camera, partway through"> |
+| **Controls.** Everything is adjustable, if you want to dig in. | **Calibrating.** The camera finds your eyes in about 10 seconds. |
 
 ## Requirements
 
