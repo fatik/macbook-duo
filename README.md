@@ -9,6 +9,12 @@ reads the lid angle sensor in the hinge and redraws the screen for where your ey
 **Screen Effect** and everything on your screen gets the effect as you tilt, then settles back when
 you stop.
 
+## Download
+
+**[Download MacBook Duo](https://github.com/fatik/macbook-duo/releases/latest/download/MacBook-Duo.dmg)**, open it,
+and drag MacBook Duo into Applications. It's signed and notarized by Apple, so it opens without a
+warning.
+
 ## Requirements
 
 - MacBook Air (M2 and later), 14- and 16-inch MacBook Pro (2021 and later), or 16-inch MacBook Pro
@@ -19,8 +25,9 @@ It isn't on the Mac App Store, because App Store apps can't read the lid sensor.
 
 ## Getting started
 
-The welcome shows the effect on a desert scene, then sets up Screen Effect, which needs Screen
-Recording permission, and calibration. Calibrating with the camera takes about 10 seconds.
+The welcome fills the screen with a desert scene: tilt your screen to see the effect, then
+calibrate. Calibrating with the camera takes about 10 seconds. Screen Effect asks for Screen
+Recording permission the first time you turn it on.
 
 Tip: close one eye. It's even better.
 
